@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "dist/preload",
+    "rootDir": "src/preload",
+    "types": ["node", "electron"],
+    "noEmit": false
+  },
+  "include": ["src/preload"]
+}
+
