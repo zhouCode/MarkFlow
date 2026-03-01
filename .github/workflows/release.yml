@@ -32,7 +32,7 @@ jobs:
           name: markflow-${{ matrix.os }}
           if-no-files-found: error
           path: |
-            dist_electron/*.dmg
+            dist_electron/*.zip
             dist_electron/*.exe
 
   release:
@@ -50,5 +50,5 @@ jobs:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            artifacts/**/*.dmg
+            artifacts/**/*.zip
             artifacts/**/*.exe

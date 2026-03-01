@@ -23,23 +23,19 @@
     ],
     "mac": {
       "target": [
-        "dmg"
+        "zip"
       ],
       "category": "public.app-category.productivity"
     },
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "portable",
           "arch": [
             "x64"
           ]
         }
       ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
     }
   },
   "dependencies": {
