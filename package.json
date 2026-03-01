@@ -1,14 +1,46 @@
 {
   "name": "markflow",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Markdown editor with presenter/audience dual-window and speaker notes.",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.main.json --watch\" \"tsc -p tsconfig.preload.json --watch\" \"wait-on dist/main/main.js dist/preload/preload.js http://localhost:5173 && electron dist/main/main.js\"",
     "build": "vite build && tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",
+    "dist": "npm run build && npx --yes electron-builder@26.0.12 --publish never",
     "start": "electron dist/main/main.js",
     "typecheck": "tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit"
+  },
+  "build": {
+    "appId": "com.zhoucode.markflow",
+    "productName": "MarkFlow",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
