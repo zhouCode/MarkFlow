@@ -15,7 +15,8 @@
     "appId": "com.zhoucode.markflow",
     "productName": "MarkFlow",
     "directories": {
-      "output": "dist_electron"
+      "output": "dist_electron",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
@@ -25,6 +26,7 @@
       "target": [
         "zip"
       ],
+      "icon": "build/icon.icns",
       "category": "public.app-category.productivity"
     },
     "win": {
@@ -35,7 +37,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "icon": "build/icon.ico"
     }
   },
   "dependencies": {
