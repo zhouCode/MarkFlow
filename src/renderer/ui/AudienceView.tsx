@@ -57,8 +57,8 @@ export function AudienceView() {
       <div className="topbar">
         <div className="left">
           <span className="pill">Audience</span>
-          <span className="pill">Mode: {mode === 'present-scroll' ? 'Scroll' : 'Slides'}</span>
-          <span className="pill">Aspect: {aspect}</span>
+          <span className="pill">Mode (WIP): {mode === 'present-scroll' ? 'Scroll' : 'Slides'}</span>
+          <span className="pill">Aspect (WIP): {aspect}</span>
           {mode === 'present-slides' && parsed ? <span className="pill">{slideIndex + 1}/{Math.max(1, parsed.slides.length)}</span> : null}
         </div>
         <div className="right">

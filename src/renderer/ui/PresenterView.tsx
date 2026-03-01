@@ -189,7 +189,7 @@ export function PresenterView() {
               window.markflow.presentSetMode({ mode: next });
             }}
           >
-            Mode: {mode === 'present-scroll' ? 'Scroll' : 'Slides'}
+            Mode (WIP): {mode === 'present-scroll' ? 'Scroll' : 'Slides'}
           </button>
           <button
             className="btn"
@@ -199,7 +199,7 @@ export function PresenterView() {
               window.markflow.presentSetAspect({ aspect: next });
             }}
           >
-            Aspect: {aspect}
+            Aspect (WIP): {aspect}
           </button>
           <button className="btn danger" onClick={() => window.markflow.presentClose()}>
             Exit

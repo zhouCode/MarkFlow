@@ -329,10 +329,10 @@ export function EditView() {
             className="btn"
             onClick={() => setPresentMode((m) => (m === 'present-scroll' ? 'present-slides' : 'present-scroll'))}
           >
-            Mode: {presentMode === 'present-scroll' ? 'Scroll' : 'Slides'}
+            Mode (WIP): {presentMode === 'present-scroll' ? 'Scroll' : 'Slides'}
           </button>
           <button className="btn" onClick={() => setAspect((a) => (a === '16:9' ? '4:3' : '16:9'))}>
-            Aspect: {aspect}
+            Aspect (WIP): {aspect}
           </button>
           <button
             className="btn"
