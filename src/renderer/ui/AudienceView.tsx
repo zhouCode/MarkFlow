@@ -13,6 +13,11 @@ export function AudienceView() {
   const [slideIndex, setSlideIndex] = React.useState(0);
   const { parsed } = useParsedDoc(markdown);
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
+  const modeRef = React.useRef<Mode>(mode);
+
+  React.useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
 
   React.useEffect(() => {
     const offInit = window.markflow.onPresentInit((p) => {
@@ -26,12 +31,20 @@ export function AudienceView() {
     const offScroll = window.markflow.onPresentScrollTo((p) => {
       const el = bodyRef.current;
       if (!el) return;
-      if (mode !== 'present-scroll') return;
+      if (modeRef.current !== 'present-scroll') return;
       const progress = typeof p?.progress === 'number' ? p.progress : 0;
       const max = Math.max(1, el.scrollHeight - el.clientHeight);
       el.scrollTop = progress * max;
     });
     const offSlide = window.markflow.onPresentSetSlide((p) => setSlideIndex(p.index));
+    const offSlideScroll = window.markflow.onPresentSetSlideScroll((p) => {
+      const el = bodyRef.current;
+      if (!el) return;
+      if (modeRef.current !== 'present-slides') return;
+      const progress = typeof p?.progress === 'number' ? p.progress : 0;
+      const max = Math.max(1, el.scrollHeight - el.clientHeight);
+      el.scrollTop = progress * max;
+    });
     return () => {
       offInit();
       offDoc();
@@ -39,8 +52,22 @@ export function AudienceView() {
       offAspect();
       offScroll();
       offSlide();
+      offSlideScroll();
     };
-  }, [mode]);
+  }, []);
+
+  React.useEffect(() => {
+    if (!parsed || mode !== 'present-slides') return;
+    setSlideIndex((current) => Math.min(current, Math.max(0, parsed.slides.length - 1)));
+  }, [parsed, mode]);
+
+  React.useEffect(() => {
+    if (mode !== 'present-slides') return;
+    const raf = requestAnimationFrame(() => {
+      if (bodyRef.current) bodyRef.current.scrollTop = 0;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [mode, slideIndex, markdown]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -53,11 +80,11 @@ export function AudienceView() {
   const html = mode === 'present-slides' ? (parsed?.slideHtml[slideIndex] ?? '') : (parsed?.html ?? '');
 
   return (
-    <div style={{ height: '100%' }}>
+    <div className="appShell">
       <div className="topbar">
         <div className="left">
           <span className="pill">Audience</span>
-          <span className="pill">Mode (WIP): {mode === 'present-scroll' ? 'Scroll' : 'Slides'}</span>
+          <span className="pill">Mode: {mode === 'present-scroll' ? 'Scroll' : 'Slides'}</span>
           <span className="pill">Aspect (WIP): {aspect}</span>
           {mode === 'present-slides' && parsed ? <span className="pill">{slideIndex + 1}/{Math.max(1, parsed.slides.length)}</span> : null}
         </div>
@@ -72,7 +99,7 @@ export function AudienceView() {
         </div>
       </div>
 
-      <div style={{ height: 'calc(100% - 52px)', padding: 12 }}>
+      <div className="audienceStage appMain">
         <div className="frameShell" style={{ height: '100%' }}>
           <div className={`aspectFrame ${aspect === '4:3' ? 'fourThree' : ''}`} style={{ width: 'min(1400px, 100%)' }}>
             <div ref={bodyRef} className="presentBody markdown" dangerouslySetInnerHTML={{ __html: html }} />

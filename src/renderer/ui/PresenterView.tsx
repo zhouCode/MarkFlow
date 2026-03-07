@@ -8,7 +8,6 @@ type Aspect = '4:3' | '16:9';
 
 export function PresenterView() {
   const { theme, toggle: toggleTheme } = useTheme();
-  const [docPath, setDocPath] = React.useState<string | null>(null);
   const [markdown, setMarkdown] = React.useState<string>('');
   const [mode, setMode] = React.useState<Mode>('present-scroll');
   const [aspect, setAspect] = React.useState<Aspect>('16:9');
@@ -26,20 +25,31 @@ export function PresenterView() {
 
   React.useEffect(() => {
     const offInit = window.markflow.onPresentInit((p) => {
-      setDocPath(p.docPath);
       setMarkdown(p.markdown);
       setMode(p.initialMode);
       setAspect(p.aspect);
     });
-    const offDoc = window.markflow.onDocUpdate((p) => {
-      setDocPath(p.docPath);
-      setMarkdown(p.markdown);
-    });
+    const offDoc = window.markflow.onDocUpdate((p) => setMarkdown(p.markdown));
     return () => {
       offInit();
       offDoc();
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!parsed || mode !== 'present-slides') return;
+    setSlideIndex((current) => Math.min(current, Math.max(0, parsed.slides.length - 1)));
+  }, [parsed, mode]);
+
+  React.useEffect(() => {
+    if (mode !== 'present-slides') return;
+    const raf = requestAnimationFrame(() => {
+      if (bodyRef.current) bodyRef.current.scrollTop = 0;
+      if (notesScrollRef.current) notesScrollRef.current.scrollTop = 0;
+      window.markflow.presentSetSlideScroll({ progress: 0 });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [mode, slideIndex, markdown]);
 
   React.useEffect(() => {
     // Render note markdown into HTML snippets.
@@ -125,12 +135,14 @@ export function PresenterView() {
       if (e.key === 'ArrowRight' || e.key === 'PageDown') {
         if (mode !== 'present-slides' || !parsed) return;
         const next = Math.min(parsed.slides.length - 1, slideIndex + 1);
+        if (next === slideIndex) return;
         setSlideIndex(next);
         window.markflow.presentSetSlide({ index: next });
       }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
         if (mode !== 'present-slides' || !parsed) return;
         const next = Math.max(0, slideIndex - 1);
+        if (next === slideIndex) return;
         setSlideIndex(next);
         window.markflow.presentSetSlide({ index: next });
       }
@@ -173,11 +185,10 @@ export function PresenterView() {
   }, [parsed, notesForCurrent, anchorTopById]);
 
   return (
-    <div style={{ height: '100%' }}>
+    <div className="appShell">
       <div className="topbar">
         <div className="left">
           <span className="pill">Presenter</span>
-          <span className="pill">{docPath ?? 'Untitled'}</span>
           <button className="btn" onClick={() => toggleTheme()}>
             Theme: {theme}
           </button>
@@ -189,7 +200,7 @@ export function PresenterView() {
               window.markflow.presentSetMode({ mode: next });
             }}
           >
-            Mode (WIP): {mode === 'present-scroll' ? 'Scroll' : 'Slides'}
+            Mode: {mode === 'present-scroll' ? 'Scroll' : 'Slides'}
           </button>
           <button
             className="btn"
@@ -211,7 +222,7 @@ export function PresenterView() {
         </div>
       </div>
 
-      <div className="split">
+      <div className="split appMain">
         <div className="card">
           <div className="cardHeader">
             <span>Content</span>
@@ -224,12 +235,15 @@ export function PresenterView() {
                   ref={bodyRef}
                   className="presentBody markdown"
                   onScroll={(e) => {
-                    if (mode !== 'present-scroll') return;
                     const el = e.currentTarget;
                     if (notesScrollRef.current) notesScrollRef.current.scrollTop = el.scrollTop;
                     const max = Math.max(1, el.scrollHeight - el.clientHeight);
                     const progress = el.scrollTop / max;
-                    window.markflow.presentScrollTo({ progress });
+                    if (mode === 'present-scroll') {
+                      window.markflow.presentScrollTo({ progress });
+                      return;
+                    }
+                    window.markflow.presentSetSlideScroll({ progress });
                   }}
                   dangerouslySetInnerHTML={{ __html: bodyHtml }}
                 />

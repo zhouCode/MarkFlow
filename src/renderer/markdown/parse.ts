@@ -6,7 +6,19 @@ import remarkRehype from 'remark-rehype';
 import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeStringify from 'rehype-stringify';
+import { common } from 'lowlight';
+import solidityPackage from 'highlightjs-solidity';
 import { nanoid } from 'nanoid';
+
+const solidity = (solidityPackage as { solidity?: unknown }).solidity;
+
+const highlightLanguages = solidity
+  ? { ...common, solidity: solidity as typeof common[string] }
+  : common;
+
+const highlightAliases = {
+  sol: 'solidity'
+};
 
 type MdRoot = any;
 type MdNode = any;
@@ -147,26 +159,27 @@ function remarkNotesAndAnchors() {
 
 function computeSlides(markdown: string, anchors: BlockAnchor[], notes: Note[]): Slide[] {
   const lines = markdown.split('\n');
-  const thematicBreakLines = new Set<number>();
+  const thematicBreakLines: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!.trim();
-    if (l === '---') thematicBreakLines.add(i + 1);
+    if (l === '---') thematicBreakLines.push(i + 1);
   }
 
-  // Start points: line 1, any thematic break line+1, any H1 line
   const startLines = new Set<number>();
   startLines.add(1);
-  for (const tb of thematicBreakLines) {
-    if (tb < lines.length) startLines.add(tb + 1);
-  }
 
-  // Detect H1 starts from anchors (heading) to avoid a second parse.
-  for (const a of anchors) {
-    if (a.kind === 'heading') {
-      const headingLine = a.sourceRange.startLine;
-      const rawLine = lines[headingLine - 1] ?? '';
-      // Markdown H1: "# " prefix
-      if (rawLine.trimStart().startsWith('# ')) startLines.add(headingLine);
+  if (thematicBreakLines.length > 0) {
+    for (const tb of thematicBreakLines) {
+      if (tb < lines.length) startLines.add(tb + 1);
+    }
+  } else {
+    // Fallback: use H1 starts only when there are no explicit slide separators.
+    for (const a of anchors) {
+      if (a.kind === 'heading') {
+        const headingLine = a.sourceRange.startLine;
+        const rawLine = lines[headingLine - 1] ?? '';
+        if (rawLine.trimStart().startsWith('# ')) startLines.add(headingLine);
+      }
     }
   }
 
@@ -216,7 +229,7 @@ export async function renderMarkdown(markdown: string): Promise<ParsedDoc> {
     .use(remarkNotesAndAnchors)
     .use(remarkRehype, { allowDangerousHtml: false })
     .use(rehypeKatex)
-    .use(rehypeHighlight)
+    .use(rehypeHighlight, { languages: highlightLanguages, aliases: highlightAliases })
     .use(rehypeStringify);
 
   const file = await processor.process(markdown);

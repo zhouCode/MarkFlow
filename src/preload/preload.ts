@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('markflow', {
   presentSetAspect: (payload: { aspect: Aspect }) => ipcRenderer.send('present:setAspect', payload),
   presentScrollTo: (payload: unknown) => ipcRenderer.send('present:scrollTo', payload),
   presentSetSlide: (payload: { index: number }) => ipcRenderer.send('present:setSlide', payload),
+  presentSetSlideScroll: (payload: { progress: number }) => ipcRenderer.send('present:setSlideScroll', payload),
 
   onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
     const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
@@ -64,5 +65,10 @@ contextBridge.exposeInMainWorld('markflow', {
     const handler = (_: unknown, payload: { index: number }) => cb(payload);
     ipcRenderer.on('present:setSlide', handler);
     return () => ipcRenderer.removeListener('present:setSlide', handler);
+  },
+  onPresentSetSlideScroll: (cb: (payload: { progress: number }) => void) => {
+    const handler = (_: unknown, payload: { progress: number }) => cb(payload);
+    ipcRenderer.on('present:setSlideScroll', handler);
+    return () => ipcRenderer.removeListener('present:setSlideScroll', handler);
   }
 });

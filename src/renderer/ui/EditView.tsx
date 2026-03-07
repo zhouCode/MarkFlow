@@ -30,6 +30,20 @@ const starter = `# MarkFlow
 # Slide Talk
 
 使用 \`---\` 或每个 H1 作为分页起点。
+
+## Solidity
+
+\`\`\`solidity
+pragma solidity ^0.8.20;
+
+contract Counter {
+  uint256 public count;
+
+  function inc() public {
+    count += 1;
+  }
+}
+\`\`\`
 `;
 
 export function EditView() {
@@ -37,7 +51,7 @@ export function EditView() {
   const [docPath, setDocPath] = React.useState<string | null>(null);
   const [markdown, setMarkdown] = React.useState<string>(starter);
   const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState<string>(starter);
-  const { parsed, error } = useParsedDoc(markdown);
+  const { parsed } = useParsedDoc(markdown);
   const [presentMode, setPresentMode] = React.useState<'present-scroll' | 'present-slides'>('present-scroll');
   const [aspect, setAspect] = React.useState<'4:3' | '16:9'>('16:9');
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
@@ -51,6 +65,11 @@ export function EditView() {
   const [previewScrollHeight, setPreviewScrollHeight] = React.useState<number>(0);
   const syncingScrollRef = React.useRef<boolean>(false);
   const editorViewRef = React.useRef<EditorView | null>(null);
+  const markdownRef = React.useRef(markdown);
+
+  React.useEffect(() => {
+    markdownRef.current = markdown;
+  }, [markdown]);
 
   React.useEffect(() => {
     const off1 = window.markflow.onDocUpdate((p) => {
@@ -60,13 +79,13 @@ export function EditView() {
     });
     const off2 = window.markflow.onDocSaved((p) => {
       setDocPath(p.docPath);
-      setLastSavedMarkdown(markdown);
+      setLastSavedMarkdown(markdownRef.current);
     });
     return () => {
       off1();
       off2();
     };
-  }, [markdown]);
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -296,7 +315,7 @@ export function EditView() {
   }, [leftMode, parsed, markdown]);
 
   return (
-    <div style={{ height: '100%' }}>
+    <div className="appShell">
       <div className="topbar">
         <div className="left">
           <button
@@ -315,7 +334,6 @@ export function EditView() {
           >
             Save
           </button>
-          <span className="pill">{docPath ?? 'Untitled.md'}</span>
           {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
         </div>
         <div className="right">
@@ -329,7 +347,7 @@ export function EditView() {
             className="btn"
             onClick={() => setPresentMode((m) => (m === 'present-scroll' ? 'present-slides' : 'present-scroll'))}
           >
-            Mode (WIP): {presentMode === 'present-scroll' ? 'Scroll' : 'Slides'}
+            Mode: {presentMode === 'present-scroll' ? 'Scroll' : 'Slides'}
           </button>
           <button className="btn" onClick={() => setAspect((a) => (a === '16:9' ? '4:3' : '16:9'))}>
             Aspect (WIP): {aspect}
@@ -351,18 +369,14 @@ export function EditView() {
         </div>
       </div>
 
-      <div className="split" style={{ gridTemplateColumns: '1.8fr 1fr' }}>
+      <div className="split appMain" style={{ gridTemplateColumns: '1.8fr 1fr' }}>
         <div className="card">
-          <div className="cardHeader">
-            <span>{leftMode === 'edit' ? 'Edit (Left)' : 'Preview (Body)'}</span>
-            <span className="statusLine">{parsed ? `${parsed.notes.length} notes, ${parsed.slides.length} slides` : 'parsing...'}</span>
-          </div>
           {leftMode === 'preview' ? (
-            <div ref={previewScrollRef} className="cardBody scrollbarHidden">
+            <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden">
               <div ref={previewRef} className="markdown" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
             </div>
           ) : (
-            <div className="cardBody" style={{ overflow: 'hidden' }}>
+            <div className="cardBody fullHeight" style={{ overflow: 'hidden' }}>
               <CodeMirror
                 value={markdown}
                 height="100%"
@@ -387,13 +401,9 @@ export function EditView() {
         </div>
 
         <div className="card">
-          <div className="cardHeader">
-            <span>Notes</span>
-            <span className="statusLine">{error ? `error: ${error}` : activeAnchor ? `active: ${activeAnchor}` : ''}</span>
-          </div>
           <div
             ref={notesScrollRef}
-            className="cardBody scrollbarHidden"
+            className="cardBody fullHeight"
             onWheel={(e) => {
               const scroller =
                 leftMode === 'preview'
@@ -436,7 +446,7 @@ export function EditView() {
                       if (!root || !scroller) return;
                       const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(n.anchorId)}"]`);
                       if (!target) return;
-                      target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+                      scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
                       return;
                     }
                     const view = editorViewRef.current;

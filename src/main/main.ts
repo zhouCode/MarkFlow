@@ -225,6 +225,9 @@ app.whenReady().then(() => {
   ipcMain.on('present:setSlide', (_evt, payload: { index: number }) => {
     forwardToAudience('present:setSlide', payload);
   });
+  ipcMain.on('present:setSlideScroll', (_evt, payload: { progress: number }) => {
+    forwardToAudience('present:setSlideScroll', payload);
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createEditWindow();

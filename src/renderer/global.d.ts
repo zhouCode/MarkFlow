@@ -20,6 +20,7 @@ declare global {
       presentSetAspect: (payload: { aspect: '4:3' | '16:9' }) => void;
       presentScrollTo: (payload: any) => void;
       presentSetSlide: (payload: { index: number }) => void;
+      presentSetSlideScroll: (payload: { progress: number }) => void;
 
       onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
       onDocSaved: (cb: (payload: { docPath: string | null }) => void) => () => void;
@@ -36,6 +37,7 @@ declare global {
       onPresentSetAspect: (cb: (payload: { aspect: '4:3' | '16:9' }) => void) => () => void;
       onPresentScrollTo: (cb: (payload: any) => void) => () => void;
       onPresentSetSlide: (cb: (payload: { index: number }) => void) => () => void;
+      onPresentSetSlideScroll: (cb: (payload: { progress: number }) => void) => () => void;
     };
   }
 }
