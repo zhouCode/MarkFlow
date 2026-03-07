@@ -218,13 +218,19 @@ export function EditView() {
 
   const notesWithTop = React.useMemo(() => {
     const list = parsed?.notes ?? [];
-    const idxByAnchor: Record<string, number> = {};
-    return list.map((n) => {
-      const baseTop = anchorTopById[n.anchorId] ?? 0;
-      const i = idxByAnchor[n.anchorId] ?? 0;
-      idxByAnchor[n.anchorId] = i + 1;
-      return { note: n, top: baseTop + i * 10 };
-    });
+    const groups = new Map<string, { top: number; notes: typeof list }>();
+    for (const n of list) {
+      const top = anchorTopById[n.anchorId] ?? 0;
+      const existing = groups.get(n.anchorId);
+      if (existing) {
+        existing.notes.push(n);
+      } else {
+        groups.set(n.anchorId, { top, notes: [n] });
+      }
+    }
+    return Array.from(groups.entries())
+      .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
+      .sort((a, b) => a.top - b.top);
   }, [parsed, anchorTopById]);
 
   const notesWithTopForEditor = React.useMemo(() => {
@@ -233,20 +239,24 @@ export function EditView() {
     const anchorLineById = new Map<string, number>();
     for (const a of parsed.anchors) anchorLineById.set(a.anchorId, a.sourceRange.startLine);
 
-    const idxByAnchor: Record<string, number> = {};
-    const out: { note: (typeof parsed.notes)[number]; top: number }[] = [];
+    const groups = new Map<string, { top: number; notes: (typeof parsed.notes) }>();
     for (const n of parsed.notes) {
       const line = anchorLineById.get(n.anchorId) ?? n.sourceRange.startLine;
       const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
       const pos = view.state.doc.line(safeLine).from;
-      const block = view.lineBlockAt(pos);
-      const baseTop = block.top;
-      const i = idxByAnchor[n.anchorId] ?? 0;
-      idxByAnchor[n.anchorId] = i + 1;
-      out.push({ note: n, top: baseTop + i * 10 });
+      const top = view.lineBlockAt(pos).top;
+      const existing = groups.get(n.anchorId);
+      if (existing) {
+        existing.notes.push(n);
+      } else {
+        groups.set(n.anchorId, { top, notes: [n] });
+      }
     }
-    return out;
+    return Array.from(groups.entries())
+      .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
+      .sort((a, b) => a.top - b.top);
   }, [parsed, markdown, leftMode]);
+
 
   React.useEffect(() => {
     if (!notesScrollRef.current) return;
@@ -275,12 +285,7 @@ export function EditView() {
     setPreviewScrollHeight(left.scrollHeight);
     const onScroll = () => {
       if (!notesScrollRef.current) return;
-      if (syncingScrollRef.current) return;
-      syncingScrollRef.current = true;
       notesScrollRef.current.scrollTop = left.scrollTop;
-      requestAnimationFrame(() => {
-        syncingScrollRef.current = false;
-      });
     };
     left.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
@@ -388,14 +393,21 @@ export function EditView() {
               <div ref={previewRef} className="markdown" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
             </div>
           ) : (
-            <div className="cardBody fullHeight" style={{ overflow: 'hidden' }}>
+            <div className="cardBody fullHeight editorPane">
               <CodeMirror
                 value={markdown}
-                height="100%"
                 theme={theme === 'dark' ? oneDark : cmLightTheme}
                 extensions={[mdLang()]}
                 onCreateEditor={(view: EditorView, _state: EditorState) => {
                   editorViewRef.current = view;
+                  view.dom.style.height = '100%';
+                  view.dom.style.display = 'flex';
+                  view.dom.style.flexDirection = 'column';
+                  view.scrollDOM.style.flex = '1';
+                  view.scrollDOM.style.minHeight = '0';
+                  view.scrollDOM.style.height = '100%';
+                  view.scrollDOM.style.overflow = 'auto';
+                  view.contentDOM.style.minHeight = '100%';
                 }}
                 onChange={(v) => {
                   setMarkdown(v);
@@ -416,6 +428,7 @@ export function EditView() {
             ref={notesScrollRef}
             className="cardBody fullHeight"
             onWheel={(e) => {
+              if (leftMode === 'edit') return;
               const scroller =
                 leftMode === 'preview'
                   ? previewScrollRef.current
@@ -426,6 +439,7 @@ export function EditView() {
               syncShareScroll(scroller);
             }}
             onScroll={(e) => {
+              if (leftMode === 'edit') return;
               const scroller =
                 leftMode === 'preview'
                   ? previewScrollRef.current
@@ -445,18 +459,20 @@ export function EditView() {
               className="notesAlignContainer"
               style={{ height: Math.max(previewScrollHeight, 1) }}
             >
-              {(leftMode === 'preview' ? notesWithTop : notesWithTopForEditor).map(({ note: n, top }) => (
+              {(leftMode === 'preview' ? notesWithTop : notesWithTopForEditor).map(({ anchorId, top, notes }) => (
                 <div
-                  key={n.id}
-                  data-note-anchor={n.anchorId}
-                  className={`noteItem abs ${activeAnchor && n.anchorId === activeAnchor ? 'active' : ''}`}
+                  key={anchorId}
+                  data-note-anchor={anchorId}
+                  className={`noteItem abs ${activeAnchor && anchorId === activeAnchor ? 'active' : ''}`}
                   style={{ top, cursor: 'pointer' }}
                   onClick={() => {
+                    const firstNote = notes[0];
+                    if (!firstNote) return;
                     if (leftMode === 'preview') {
                       const root = previewRef.current;
                       const scroller = previewScrollRef.current;
                       if (!root || !scroller) return;
-                      const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(n.anchorId)}"]`);
+                      const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchorId)}"]`);
                       if (!target) return;
                       scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
                       requestAnimationFrame(() => {
@@ -466,8 +482,8 @@ export function EditView() {
                     }
                     const view = editorViewRef.current;
                     if (!view || !parsed) return;
-                    const anchor = parsed.anchors.find((a) => a.anchorId === n.anchorId);
-                    const line = anchor?.sourceRange.startLine ?? n.sourceRange.startLine;
+                    const anchor = parsed.anchors.find((a) => a.anchorId === anchorId);
+                    const line = anchor?.sourceRange.startLine ?? firstNote.sourceRange.startLine;
                     const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
                     const pos = view.state.doc.line(safeLine).from;
                     const block = view.lineBlockAt(pos);
@@ -475,8 +491,12 @@ export function EditView() {
                     syncShareScroll(view.scrollDOM);
                   }}
                 >
-                  <div className="noteMeta">line {n.sourceRange.startLine}</div>
-                  <div dangerouslySetInnerHTML={{ __html: noteHtmlById[n.id] ?? '' }} />
+                  {notes.map((n) => (
+                    <div key={n.id} className="noteEntry">
+                      <div className="noteMeta">line {n.sourceRange.startLine}</div>
+                      <div dangerouslySetInnerHTML={{ __html: noteHtmlById[n.id] ?? '' }} />
+                    </div>
+                  ))}
                 </div>
               ))}
               {(parsed?.notes ?? []).length === 0 ? (

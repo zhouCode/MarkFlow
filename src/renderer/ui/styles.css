@@ -190,6 +190,24 @@ body {
   overflow: auto;
 }
 
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .split {
   display: grid;
   grid-template-columns: 1.6fr 1fr;
@@ -280,9 +298,44 @@ body {
   height: 0;
 }
 
+.editorPane {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.editorPane > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.editorPane .cm-theme,
+.editorPane .cm-editor {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editorPane .cm-scroller {
+  flex: 1;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.cm-editor {
+  height: 100%;
+}
+
 .cm-scroller {
+  overflow: auto;
+  height: 100%;
   scrollbar-width: none;
   overscroll-behavior: contain;
+}
+
+.cm-content {
+  min-height: 100%;
 }
 
 .cm-scroller::-webkit-scrollbar {
@@ -303,6 +356,11 @@ body {
   right: 12px;
 }
 
+.noteEntry + .noteEntry {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
 
 .noteItem.active {
   border-color: rgba(94, 234, 212, 0.55);
