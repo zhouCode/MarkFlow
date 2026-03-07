@@ -1,22 +1,23 @@
 # MarkFlow
 
-Markdown editor with dual-window presentation:
+Markdown editor with a private workspace plus a separate native share window:
 
-- Audience window: clean markdown content only
-- Presenter window: content + synced speaker notes
+- Main window: document area + private speaker notes
+- Share window: clean markdown content only
 
-## Features (Current)
+## Features
 
 - Speaker notes extracted from Markdown comments: `<!-- note: ... -->`
 - Notes panel follows the primary scroll source (Preview or Editor)
-- Presentation opens 2 windows (Presenter + Audience) and can exit with `Esc`
+- Share workflow opens a separate native window that conferencing tools can share directly
 - Light/dark theme toggle
 
-## Status / TODO
+## Sharing workflow
 
-See [TODO.md](./TODO.md).
-
-Note: `Slide Talk` and aspect ratio (`4:3` / `16:9`) are not considered complete yet and are tracked as TODO items.
+1. Keep working in the main window.
+2. Click **Open Share Window** or press `F5`.
+3. In Zoom / Meet / Teams, choose **MarkFlow Share Window**.
+4. Private notes remain visible only in the main window.
 
 ## Dev
 

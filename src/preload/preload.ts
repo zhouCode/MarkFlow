@@ -1,13 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-type PresentMode = 'present-scroll' | 'present-slides';
-type Aspect = '4:3' | '16:9';
-
-export type PresentInit = {
+export type ShareInit = {
   docPath: string | null;
   markdown: string;
-  initialMode: PresentMode;
-  aspect: Aspect;
+  progress: number;
 };
 
 contextBridge.exposeInMainWorld('markflow', {
@@ -15,20 +11,13 @@ contextBridge.exposeInMainWorld('markflow', {
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
   docSetMarkdown: (args: { docPath: string | null; markdown: string }) => ipcRenderer.send('doc:setMarkdown', args),
 
-  presentOpen: (payload: {
+  shareOpen: (payload: {
     docPath: string | null;
     markdown: string;
-    initialMode: PresentMode;
-    aspect: Aspect;
     displayTarget?: 'auto' | 'external' | 'primary';
-  }) => ipcRenderer.send('present:open', payload),
-  presentClose: () => ipcRenderer.send('present:close'),
-
-  presentSetMode: (payload: { mode: PresentMode }) => ipcRenderer.send('present:setMode', payload),
-  presentSetAspect: (payload: { aspect: Aspect }) => ipcRenderer.send('present:setAspect', payload),
-  presentScrollTo: (payload: unknown) => ipcRenderer.send('present:scrollTo', payload),
-  presentSetSlide: (payload: { index: number }) => ipcRenderer.send('present:setSlide', payload),
-  presentSetSlideScroll: (payload: { progress: number }) => ipcRenderer.send('present:setSlideScroll', payload),
+  }) => ipcRenderer.send('share:open', payload),
+  shareClose: () => ipcRenderer.send('share:close'),
+  shareScrollTo: (payload: { progress: number }) => ipcRenderer.send('share:scrollTo', payload),
 
   onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
     const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
@@ -41,34 +30,19 @@ contextBridge.exposeInMainWorld('markflow', {
     return () => ipcRenderer.removeListener('doc:saved', handler);
   },
 
-  onPresentInit: (cb: (payload: PresentInit) => void) => {
-    const handler = (_: unknown, payload: PresentInit) => cb(payload);
-    ipcRenderer.on('present:init', handler);
-    return () => ipcRenderer.removeListener('present:init', handler);
+  onShareInit: (cb: (payload: ShareInit) => void) => {
+    const handler = (_: unknown, payload: ShareInit) => cb(payload);
+    ipcRenderer.on('share:init', handler);
+    return () => ipcRenderer.removeListener('share:init', handler);
   },
-  onPresentSetMode: (cb: (payload: { mode: PresentMode }) => void) => {
-    const handler = (_: unknown, payload: { mode: PresentMode }) => cb(payload);
-    ipcRenderer.on('present:setMode', handler);
-    return () => ipcRenderer.removeListener('present:setMode', handler);
-  },
-  onPresentSetAspect: (cb: (payload: { aspect: Aspect }) => void) => {
-    const handler = (_: unknown, payload: { aspect: Aspect }) => cb(payload);
-    ipcRenderer.on('present:setAspect', handler);
-    return () => ipcRenderer.removeListener('present:setAspect', handler);
-  },
-  onPresentScrollTo: (cb: (payload: any) => void) => {
-    const handler = (_: unknown, payload: any) => cb(payload);
-    ipcRenderer.on('present:scrollTo', handler);
-    return () => ipcRenderer.removeListener('present:scrollTo', handler);
-  },
-  onPresentSetSlide: (cb: (payload: { index: number }) => void) => {
-    const handler = (_: unknown, payload: { index: number }) => cb(payload);
-    ipcRenderer.on('present:setSlide', handler);
-    return () => ipcRenderer.removeListener('present:setSlide', handler);
-  },
-  onPresentSetSlideScroll: (cb: (payload: { progress: number }) => void) => {
+  onShareScrollTo: (cb: (payload: { progress: number }) => void) => {
     const handler = (_: unknown, payload: { progress: number }) => cb(payload);
-    ipcRenderer.on('present:setSlideScroll', handler);
-    return () => ipcRenderer.removeListener('present:setSlideScroll', handler);
+    ipcRenderer.on('share:scrollTo', handler);
+    return () => ipcRenderer.removeListener('share:scrollTo', handler);
+  },
+  onShareClosed: (cb: () => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('share:closed', handler);
+    return () => ipcRenderer.removeListener('share:closed', handler);
   }
 });

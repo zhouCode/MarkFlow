@@ -8,58 +8,25 @@ import { useParsedDoc } from './useParsedDoc';
 import { renderInlineMarkdown } from '../markdown/parse';
 import { useTheme } from './theme';
 
-const starter = `# MarkFlow
-
-这是一个演讲增强版 Markdown 编辑器。
-
-<!-- note: 右侧是讲者注释；投屏观众端不会看到。 -->
-
-## Scroll Talk
-
-向下滚动，注释会高亮跟随当前段落锚点。
-
-<!-- note
-多行注释也支持。
-
-- 可以写列表
-- 可以强调
--->
-
----
-
-# Slide Talk
-
-使用 \`---\` 或每个 H1 作为分页起点。
-
-## Solidity
-
-\`\`\`solidity
-pragma solidity ^0.8.20;
-
-contract Counter {
-  uint256 public count;
-
-  function inc() public {
-    count += 1;
-  }
-}
-\`\`\`
-`;
-
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
-  const [markdown, setMarkdown] = React.useState<string>(starter);
-  const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState<string>(starter);
+  const [markdown, setMarkdown] = React.useState<string>('');
+  const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState<string>('');
   const { parsed } = useParsedDoc(markdown);
-  const [presentMode, setPresentMode] = React.useState<'present-scroll' | 'present-slides'>('present-scroll');
-  const [aspect, setAspect] = React.useState<'4:3' | '16:9'>('16:9');
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
+  const [shareWindowOpen, setShareWindowOpen] = React.useState(false);
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});
   const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
   const previewRef = React.useRef<HTMLDivElement | null>(null);
   const notesScrollRef = React.useRef<HTMLDivElement | null>(null);
   const notesPaneRef = React.useRef<HTMLDivElement | null>(null);
+  const syncShareScroll = React.useCallback((scroller: HTMLElement | null) => {
+    if (!scroller) return;
+    const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+    const progress = scroller.scrollTop / max;
+    window.markflow.shareScrollTo({ progress });
+  }, []);
   const [activeAnchor, setActiveAnchor] = React.useState<string | null>(null);
   const [anchorTopById, setAnchorTopById] = React.useState<Record<string, number>>({});
   const [previewScrollHeight, setPreviewScrollHeight] = React.useState<number>(0);
@@ -85,6 +52,13 @@ export function EditView() {
       off1();
       off2();
     };
+  }, []);
+
+  React.useEffect(() => {
+    const offShareClosed = window.markflow.onShareClosed(() => {
+      setShareWindowOpen(false);
+    });
+    return () => offShareClosed();
   }, []);
 
   React.useEffect(() => {
@@ -166,12 +140,15 @@ export function EditView() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'F5') {
         e.preventDefault();
-        window.markflow.presentOpen({
+        setLeftMode('preview');
+        setShareWindowOpen(true);
+        window.markflow.shareOpen({
           docPath,
           markdown,
-          initialMode: presentMode,
-          aspect,
           displayTarget: 'auto'
+        });
+        requestAnimationFrame(() => {
+          syncShareScroll(previewScrollRef.current);
         });
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -182,10 +159,48 @@ export function EditView() {
         e.preventDefault();
         setLeftMode((m) => (m === 'edit' ? 'preview' : 'edit'));
       }
+      if (e.key === 'Escape' && shareWindowOpen) {
+        e.preventDefault();
+        setShareWindowOpen(false);
+        window.markflow.shareClose();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [docPath, markdown, presentMode, aspect]);
+  }, [docPath, markdown, shareWindowOpen]);
+
+  React.useEffect(() => {
+    if (!shareWindowOpen) return;
+    let raf = 0;
+    let lastScrollTop = -1;
+    let lastScrollHeight = -1;
+    let lastClientHeight = -1;
+
+    const tick = () => {
+      const scroller = leftMode === 'preview'
+        ? previewScrollRef.current
+        : (editorViewRef.current?.scrollDOM ?? null);
+      if (scroller) {
+        const nextScrollTop = scroller.scrollTop;
+        const nextScrollHeight = scroller.scrollHeight;
+        const nextClientHeight = scroller.clientHeight;
+        if (
+          nextScrollTop !== lastScrollTop ||
+          nextScrollHeight !== lastScrollHeight ||
+          nextClientHeight !== lastClientHeight
+        ) {
+          lastScrollTop = nextScrollTop;
+          lastScrollHeight = nextScrollHeight;
+          lastClientHeight = nextClientHeight;
+          syncShareScroll(scroller);
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [shareWindowOpen, leftMode, parsed, markdown, syncShareScroll]);
 
   const dirty = markdown !== lastSavedMarkdown;
   const cmLightTheme = React.useMemo(
@@ -212,7 +227,6 @@ export function EditView() {
     });
   }, [parsed, anchorTopById]);
 
-  // In edit mode, map notes to editor line positions (no preview DOM involved).
   const notesWithTopForEditor = React.useMemo(() => {
     const view = editorViewRef.current;
     if (!view || !parsed) return [];
@@ -234,17 +248,12 @@ export function EditView() {
     return out;
   }, [parsed, markdown, leftMode]);
 
-  // Sync right pane scroll to whichever "primary scroll source" is active.
   React.useEffect(() => {
     if (!notesScrollRef.current) return;
-
-    // Clean up any previous listener when toggling modes.
-    const notesEl = notesScrollRef.current;
 
     if (leftMode === 'preview') {
       const left = previewScrollRef.current;
       if (!left) return;
-      // Ensure height stays accurate even if notes are rendered before the next ResizeObserver tick.
       setPreviewScrollHeight(left.scrollHeight);
       const onScroll = () => {
         if (!notesScrollRef.current) return;
@@ -256,7 +265,6 @@ export function EditView() {
         });
       };
       left.addEventListener('scroll', onScroll, { passive: true });
-      // initial
       onScroll();
       return () => left.removeEventListener('scroll', onScroll);
     }
@@ -279,7 +287,6 @@ export function EditView() {
     return () => left.removeEventListener('scroll', onScroll);
   }, [leftMode, parsed]);
 
-  // In edit mode, compute active anchor by scrollTop and anchor lines.
   React.useEffect(() => {
     if (leftMode !== 'edit') return;
     const view = editorViewRef.current;
@@ -288,7 +295,6 @@ export function EditView() {
     const anchorLineById = new Map<string, number>();
     for (const a of parsed.anchors) anchorLineById.set(a.anchorId, a.sourceRange.startLine);
 
-    // Precompute anchors sorted by top.
     const anchors = parsed.anchors
       .map((a) => {
         const line = anchorLineById.get(a.anchorId) ?? 1;
@@ -335,6 +341,7 @@ export function EditView() {
             Save
           </button>
           {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
+          <span className="pill">Private workspace</span>
         </div>
         <div className="right">
           <button className="btn" onClick={() => toggleTheme()}>
@@ -345,27 +352,32 @@ export function EditView() {
           </button>
           <button
             className="btn"
-            onClick={() => setPresentMode((m) => (m === 'present-scroll' ? 'present-slides' : 'present-scroll'))}
-          >
-            Mode: {presentMode === 'present-scroll' ? 'Scroll' : 'Slides'}
-          </button>
-          <button className="btn" onClick={() => setAspect((a) => (a === '16:9' ? '4:3' : '16:9'))}>
-            Aspect (WIP): {aspect}
-          </button>
-          <button
-            className="btn"
             onClick={() => {
-              window.markflow.presentOpen({
+              setLeftMode('preview');
+              setShareWindowOpen(true);
+              window.markflow.shareOpen({
                 docPath,
                 markdown,
-                initialMode: presentMode,
-                aspect,
                 displayTarget: 'auto'
+              });
+              requestAnimationFrame(() => {
+                syncShareScroll(previewScrollRef.current);
               });
             }}
           >
-            Present (F5)
+            Open Share Window (F5)
           </button>
+          {shareWindowOpen ? (
+            <button
+              className="btn danger"
+              onClick={() => {
+                setShareWindowOpen(false);
+                window.markflow.shareClose();
+              }}
+            >
+              Close Share Window
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -384,7 +396,6 @@ export function EditView() {
                 extensions={[mdLang()]}
                 onCreateEditor={(view: EditorView, _state: EditorState) => {
                   editorViewRef.current = view;
-                  // Hide editor scrollbar via CSS; still scrollable.
                 }}
                 onChange={(v) => {
                   setMarkdown(v);
@@ -410,9 +421,9 @@ export function EditView() {
                   ? previewScrollRef.current
                   : (editorViewRef.current?.scrollDOM ?? null);
               if (!scroller) return;
-              // Make the whole page feel like a single scroll area.
               e.preventDefault();
               scroller.scrollTop += e.deltaY;
+              syncShareScroll(scroller);
             }}
             onScroll={(e) => {
               const scroller =
@@ -423,6 +434,7 @@ export function EditView() {
               if (syncingScrollRef.current) return;
               syncingScrollRef.current = true;
               scroller.scrollTop = e.currentTarget.scrollTop;
+              syncShareScroll(scroller);
               requestAnimationFrame(() => {
                 syncingScrollRef.current = false;
               });
@@ -447,6 +459,9 @@ export function EditView() {
                       const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(n.anchorId)}"]`);
                       if (!target) return;
                       scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
+                      requestAnimationFrame(() => {
+                        syncShareScroll(scroller);
+                      });
                       return;
                     }
                     const view = editorViewRef.current;
@@ -457,6 +472,7 @@ export function EditView() {
                     const pos = view.state.doc.line(safeLine).from;
                     const block = view.lineBlockAt(pos);
                     view.scrollDOM.scrollTop = block.top;
+                    syncShareScroll(view.scrollDOM);
                   }}
                 >
                   <div className="noteMeta">line {n.sourceRange.startLine}</div>

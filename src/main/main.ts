@@ -3,30 +3,55 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-type PresentMode = 'present-scroll' | 'present-slides';
-type Aspect = '4:3' | '16:9';
-
-type PresentOpenPayload = {
+type ShareOpenPayload = {
   docPath: string | null;
   markdown: string;
-  initialMode: PresentMode;
-  aspect: Aspect;
   displayTarget?: 'auto' | 'external' | 'primary';
 };
 
+type PersistedState = {
+  lastDocPath: string | null;
+};
+
 let editWindow: BrowserWindow | null = null;
-let presenterWindow: BrowserWindow | null = null;
-let audienceWindow: BrowserWindow | null = null;
+let shareWindow: BrowserWindow | null = null;
 
 let currentDocPath: string | null = null;
 let currentMarkdown = '';
+let currentShareProgress = 0;
+
+function stateFilePath(): string {
+  return path.join(app.getPath('userData'), 'state.json');
+}
+
+async function readPersistedState(): Promise<PersistedState> {
+  try {
+    const raw = await fs.readFile(stateFilePath(), 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<PersistedState>;
+    return { lastDocPath: typeof parsed.lastDocPath === 'string' ? parsed.lastDocPath : null };
+  } catch {
+    return { lastDocPath: null };
+  }
+}
+
+async function writePersistedState(state: PersistedState): Promise<void> {
+  await fs.mkdir(path.dirname(stateFilePath()), { recursive: true });
+  await fs.writeFile(stateFilePath(), JSON.stringify(state), 'utf-8');
+}
+
+async function loadDocument(filePath: string) {
+  const markdown = await fs.readFile(filePath, 'utf-8');
+  currentDocPath = filePath;
+  currentMarkdown = markdown;
+  await writePersistedState({ lastDocPath: filePath });
+  return { docPath: currentDocPath, markdown: currentMarkdown };
+}
 
 function isDev(): boolean {
   return !app.isPackaged;
 }
 
 function preloadPath(): string {
-  // Runtime layout (dev): dist/main/main.js, dist/preload/preload.js, dist/renderer/index.html
   return path.join(__dirname, '..', 'preload', 'preload.js');
 }
 
@@ -34,7 +59,7 @@ function devServerUrl(): string {
   return process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173';
 }
 
-function getRendererUrl(view: 'edit' | 'presenter' | 'audience'): string {
+function getRendererUrl(view: 'edit' | 'share'): string {
   const q = `?view=${encodeURIComponent(view)}`;
   if (isDev()) {
     return `${devServerUrl()}/${q}`;
@@ -48,6 +73,7 @@ function createEditWindow() {
   editWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    title: 'MarkFlow',
     webPreferences: {
       preload: preloadPath(),
       contextIsolation: true,
@@ -61,29 +87,36 @@ function createEditWindow() {
   });
 }
 
-function chooseAudienceDisplay(target: 'auto' | 'external' | 'primary' = 'auto') {
+function chooseShareDisplay(target: 'auto' | 'external' | 'primary' = 'auto') {
   const displays = screen.getAllDisplays();
   const primary = screen.getPrimaryDisplay();
   if (target === 'primary') return primary;
   if (target === 'external') {
     return displays.find((d) => d.id !== primary.id) ?? primary;
   }
-  // auto: prefer non-primary if present
   return displays.find((d) => d.id !== primary.id) ?? primary;
 }
 
-function createPresentationWindows(payload: PresentOpenPayload) {
-  const audienceDisplay = chooseAudienceDisplay(payload.displayTarget ?? 'auto');
-  const presenterDisplay = screen.getPrimaryDisplay();
+function forwardToShare(channel: string, payload: unknown) {
+  shareWindow?.webContents.send(channel, payload);
+}
 
-  audienceWindow?.close();
-  presenterWindow?.close();
+function notifyShareClosed() {
+  editWindow?.webContents.send('share:closed');
+}
 
-  audienceWindow = new BrowserWindow({
-    x: audienceDisplay.bounds.x,
-    y: audienceDisplay.bounds.y,
-    width: Math.min(1280, audienceDisplay.workAreaSize.width),
-    height: Math.min(720, audienceDisplay.workAreaSize.height),
+function createShareWindow(payload: ShareOpenPayload) {
+  const shareDisplay = chooseShareDisplay(payload.displayTarget ?? 'auto');
+
+  shareWindow?.close();
+
+  shareWindow = new BrowserWindow({
+    x: shareDisplay.bounds.x + 40,
+    y: shareDisplay.bounds.y + 40,
+    width: Math.min(1280, Math.max(900, shareDisplay.workAreaSize.width - 80)),
+    height: Math.min(820, Math.max(640, shareDisplay.workAreaSize.height - 80)),
+    title: 'MarkFlow Share Window',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath(),
       contextIsolation: true,
@@ -91,64 +124,44 @@ function createPresentationWindows(payload: PresentOpenPayload) {
     }
   });
 
-  presenterWindow = new BrowserWindow({
-    x: presenterDisplay.bounds.x + 40,
-    y: presenterDisplay.bounds.y + 40,
-    width: 1400,
-    height: 900,
-    webPreferences: {
-      preload: preloadPath(),
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
+  shareWindow.loadURL(getRendererUrl('share'));
+  shareWindow.setMenuBarVisibility(false);
 
-  audienceWindow.loadURL(getRendererUrl('audience'));
-  presenterWindow.loadURL(getRendererUrl('presenter'));
-  audienceWindow.setMenuBarVisibility(false);
-  presenterWindow.setMenuBarVisibility(false);
-  // Default to fullscreen for the audience output (common projector workflow).
-  audienceWindow.once('ready-to-show', () => {
-    try {
-      audienceWindow?.setFullScreen(true);
-    } catch {
-      // ignore
-    }
-  });
-
-  // Once loaded, push initial state into both windows.
   const pushInitial = () => {
-    const msg = {
+    shareWindow?.webContents.send('share:init', {
       docPath: payload.docPath,
       markdown: payload.markdown,
-      initialMode: payload.initialMode,
-      aspect: payload.aspect
-    };
-    presenterWindow?.webContents.send('present:init', msg);
-    audienceWindow?.webContents.send('present:init', msg);
+      progress: currentShareProgress
+    });
   };
 
-  presenterWindow.webContents.on('did-finish-load', pushInitial);
-  audienceWindow.webContents.on('did-finish-load', pushInitial);
-
-  audienceWindow.on('closed', () => {
-    audienceWindow = null;
+  shareWindow.webContents.once('did-finish-load', pushInitial);
+  shareWindow.once('ready-to-show', () => {
+    pushInitial();
+    setTimeout(pushInitial, 50);
+    shareWindow?.show();
+    shareWindow?.focus();
   });
-  presenterWindow.on('closed', () => {
-    presenterWindow = null;
+  shareWindow.on('closed', () => {
+    shareWindow = null;
+    notifyShareClosed();
   });
 }
 
-function forwardToAudience(channel: string, payload: unknown) {
-  audienceWindow?.webContents.send(channel, payload);
-}
-
-function forwardToPresenter(channel: string, payload: unknown) {
-  presenterWindow?.webContents.send(channel, payload);
-}
-
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createEditWindow();
+
+  const persisted = await readPersistedState();
+  if (persisted.lastDocPath) {
+    try {
+      const restored = await loadDocument(persisted.lastDocPath);
+      editWindow?.webContents.once('did-finish-load', () => {
+        editWindow?.webContents.send('doc:update', restored);
+      });
+    } catch {
+      await writePersistedState({ lastDocPath: null });
+    }
+  }
 
   ipcMain.handle('doc:open', async () => {
     const { dialog } = await import('electron');
@@ -159,14 +172,10 @@ app.whenReady().then(() => {
     });
     if (res.canceled || res.filePaths.length === 0) return null;
     const filePath = res.filePaths[0]!;
-    const markdown = await fs.readFile(filePath, 'utf-8');
-    currentDocPath = filePath;
-    currentMarkdown = markdown;
-    // Push to any open windows.
-    editWindow.webContents.send('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
-    forwardToPresenter('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
-    forwardToAudience('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
-    return { docPath: currentDocPath, markdown: currentMarkdown };
+    const payload = await loadDocument(filePath);
+    editWindow.webContents.send('doc:update', payload);
+    forwardToShare('doc:update', payload);
+    return payload;
   });
 
   ipcMain.handle('doc:save', async (_evt, args: { docPath: string | null; markdown: string }) => {
@@ -183,50 +192,33 @@ app.whenReady().then(() => {
     await fs.writeFile(filePath, args.markdown, 'utf-8');
     currentDocPath = filePath;
     currentMarkdown = args.markdown;
+    await writePersistedState({ lastDocPath: filePath });
     editWindow.webContents.send('doc:saved', { docPath: currentDocPath });
-    forwardToPresenter('doc:saved', { docPath: currentDocPath });
-    forwardToAudience('doc:saved', { docPath: currentDocPath });
     return { docPath: currentDocPath };
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {
     currentMarkdown = args.markdown;
     currentDocPath = args.docPath;
-    forwardToPresenter('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
-    forwardToAudience('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
+    forwardToShare('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
   });
 
-  ipcMain.on('present:open', (_evt, payload: PresentOpenPayload) => {
-    createPresentationWindows(payload);
+  ipcMain.on('share:open', (_evt, payload: ShareOpenPayload) => {
+    createShareWindow(payload);
   });
 
-  ipcMain.on('present:close', () => {
-    try {
-      audienceWindow?.setFullScreen(false);
-    } catch {
-      // ignore
-    }
-    audienceWindow?.close();
-    presenterWindow?.close();
-    audienceWindow = null;
-    presenterWindow = null;
+  ipcMain.on('share:close', () => {
+    shareWindow?.close();
+    shareWindow = null;
     editWindow?.focus();
   });
 
-  ipcMain.on('present:setMode', (_evt, payload: { mode: PresentMode }) => {
-    forwardToAudience('present:setMode', payload);
-  });
-  ipcMain.on('present:setAspect', (_evt, payload: { aspect: Aspect }) => {
-    forwardToAudience('present:setAspect', payload);
-  });
-  ipcMain.on('present:scrollTo', (_evt, payload: unknown) => {
-    forwardToAudience('present:scrollTo', payload);
-  });
-  ipcMain.on('present:setSlide', (_evt, payload: { index: number }) => {
-    forwardToAudience('present:setSlide', payload);
-  });
-  ipcMain.on('present:setSlideScroll', (_evt, payload: { progress: number }) => {
-    forwardToAudience('present:setSlideScroll', payload);
+  ipcMain.on('share:scrollTo', (_evt, payload: unknown) => {
+    const progress = typeof (payload as { progress?: unknown })?.progress === 'number'
+      ? Number((payload as { progress: number }).progress)
+      : 0;
+    currentShareProgress = Math.max(0, Math.min(1, progress));
+    forwardToShare('share:scrollTo', { progress: currentShareProgress });
   });
 
   app.on('activate', () => {

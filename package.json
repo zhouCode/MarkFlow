@@ -1,8 +1,8 @@
 {
   "name": "markflow",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Markdown editor with presenter/audience dual-window and speaker notes.",
+  "description": "Markdown editor with a private notes workspace and native share window.",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.main.json --watch\" \"tsc -p tsconfig.preload.json --watch\" \"wait-on dist/main/main.js dist/preload/preload.js http://localhost:5173 && electron dist/main/main.js\"",
