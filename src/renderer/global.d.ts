@@ -7,6 +7,10 @@ declare global {
       docSave: (args: { docPath: string | null; markdown: string }) => Promise<{ docPath: string | null } | null>;
       docSetMarkdown: (args: { docPath: string | null; markdown: string }) => void;
 
+      contentZoomIn: () => void;
+      contentZoomOut: () => void;
+      contentZoomReset: () => void;
+
       shareOpen: (payload: {
         docPath: string | null;
         markdown: string;
@@ -17,8 +21,9 @@ declare global {
 
       onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
       onDocSaved: (cb: (payload: { docPath: string | null }) => void) => () => void;
+      onContentZoomUpdate: (cb: (payload: { scale: number }) => void) => () => void;
 
-      onShareInit: (cb: (payload: { docPath: string | null; markdown: string; progress: number }) => void) => () => void;
+      onShareInit: (cb: (payload: { docPath: string | null; markdown: string; progress: number; zoomScale: number }) => void) => () => void;
       onShareScrollTo: (cb: (payload: { progress: number }) => void) => () => void;
       onShareClosed: (cb: () => void) => () => void;
     };

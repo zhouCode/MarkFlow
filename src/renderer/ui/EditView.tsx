@@ -17,6 +17,7 @@ export function EditView() {
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [shareWindowOpen, setShareWindowOpen] = React.useState(false);
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});
+  const [contentZoomScale, setContentZoomScale] = React.useState(1);
   const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
   const previewRef = React.useRef<HTMLDivElement | null>(null);
   const notesScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -27,6 +28,11 @@ export function EditView() {
     const progress = scroller.scrollTop / max;
     window.markflow.shareScrollTo({ progress });
   }, []);
+  const currentShareScroller = React.useCallback(() => {
+    return leftMode === 'preview'
+      ? previewScrollRef.current
+      : (editorViewRef.current?.scrollDOM ?? null);
+  }, [leftMode]);
   const [activeAnchor, setActiveAnchor] = React.useState<string | null>(null);
   const [anchorTopById, setAnchorTopById] = React.useState<Record<string, number>>({});
   const [previewScrollHeight, setPreviewScrollHeight] = React.useState<number>(0);
@@ -48,9 +54,13 @@ export function EditView() {
       setDocPath(p.docPath);
       setLastSavedMarkdown(markdownRef.current);
     });
+    const off3 = window.markflow.onContentZoomUpdate((p) => {
+      setContentZoomScale(p.scale);
+    });
     return () => {
       off1();
       off2();
+      off3();
     };
   }, []);
 
@@ -95,7 +105,7 @@ export function EditView() {
     );
     for (const a of anchors) obs.observe(a);
     return () => obs.disconnect();
-  }, [parsed, leftMode]);
+  }, [parsed, leftMode, contentZoomScale]);
 
   React.useEffect(() => {
     if (!parsed) return;
@@ -134,10 +144,29 @@ export function EditView() {
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [parsed, leftMode]);
+  }, [parsed, leftMode, contentZoomScale]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract')) {
+        e.preventDefault();
+        window.markflow.contentZoomOut();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
+        e.preventDefault();
+        window.markflow.contentZoomReset();
+        return;
+      }
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd')
+      ) {
+        e.preventDefault();
+        window.markflow.contentZoomIn();
+        return;
+      }
       if (e.key === 'F5') {
         e.preventDefault();
         setLeftMode('preview');
@@ -147,17 +176,17 @@ export function EditView() {
           markdown,
           displayTarget: 'auto'
         });
-        requestAnimationFrame(() => {
-          syncShareScroll(previewScrollRef.current);
-        });
+        return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         window.markflow.docSave({ docPath, markdown });
+        return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
         setLeftMode((m) => (m === 'edit' ? 'preview' : 'edit'));
+        return;
       }
       if (e.key === 'Escape' && shareWindowOpen) {
         e.preventDefault();
@@ -167,42 +196,40 @@ export function EditView() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [docPath, markdown, shareWindowOpen]);
+  }, [docPath, markdown, shareWindowOpen, syncShareScroll]);
 
   React.useEffect(() => {
     if (!shareWindowOpen) return;
-    let raf = 0;
-    let lastScrollTop = -1;
-    let lastScrollHeight = -1;
-    let lastClientHeight = -1;
+    const scroller = currentShareScroller();
+    if (!scroller) return;
 
-    const tick = () => {
-      const scroller = leftMode === 'preview'
-        ? previewScrollRef.current
-        : (editorViewRef.current?.scrollDOM ?? null);
-      if (scroller) {
-        const nextScrollTop = scroller.scrollTop;
-        const nextScrollHeight = scroller.scrollHeight;
-        const nextClientHeight = scroller.clientHeight;
-        if (
-          nextScrollTop !== lastScrollTop ||
-          nextScrollHeight !== lastScrollHeight ||
-          nextClientHeight !== lastClientHeight
-        ) {
-          lastScrollTop = nextScrollTop;
-          lastScrollHeight = nextScrollHeight;
-          lastClientHeight = nextClientHeight;
-          syncShareScroll(scroller);
-        }
-      }
-      raf = requestAnimationFrame(tick);
+    const onScroll = () => syncShareScroll(scroller);
+    const ro = new ResizeObserver(() => {
+      syncShareScroll(scroller);
+    });
+    const editContent = editorViewRef.current?.contentDOM ?? null;
+
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    ro.observe(scroller);
+    if (leftMode === 'preview' && previewRef.current) {
+      ro.observe(previewRef.current);
+    }
+    if (leftMode === 'edit' && editContent) {
+      ro.observe(editContent);
+    }
+    syncShareScroll(scroller);
+
+    return () => {
+      scroller.removeEventListener('scroll', onScroll);
+      ro.disconnect();
     };
-
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [shareWindowOpen, leftMode, parsed, markdown, syncShareScroll]);
+  }, [shareWindowOpen, leftMode, parsed, markdown, contentZoomScale, currentShareScroller, syncShareScroll]);
 
   const dirty = markdown !== lastSavedMarkdown;
+  const contentZoomStyle = React.useMemo(
+    () => ({ '--content-zoom': String(contentZoomScale) } as React.CSSProperties),
+    [contentZoomScale]
+  );
   const cmLightTheme = React.useMemo(
     () =>
       EditorView.theme(
@@ -255,7 +282,7 @@ export function EditView() {
     return Array.from(groups.entries())
       .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
       .sort((a, b) => a.top - b.top);
-  }, [parsed, markdown, leftMode]);
+  }, [parsed, markdown, leftMode, contentZoomScale]);
 
 
   React.useEffect(() => {
@@ -290,7 +317,7 @@ export function EditView() {
     left.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     return () => left.removeEventListener('scroll', onScroll);
-  }, [leftMode, parsed]);
+  }, [leftMode, parsed, contentZoomScale]);
 
   React.useEffect(() => {
     if (leftMode !== 'edit') return;
@@ -323,7 +350,7 @@ export function EditView() {
     view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     return () => view.scrollDOM.removeEventListener('scroll', onScroll);
-  }, [leftMode, parsed, markdown]);
+  }, [leftMode, parsed, markdown, contentZoomScale]);
 
   return (
     <div className="appShell">
@@ -347,6 +374,7 @@ export function EditView() {
           </button>
           {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
           <span className="pill">Private workspace</span>
+          <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
         </div>
         <div className="right">
           <button className="btn" onClick={() => toggleTheme()}>
@@ -364,9 +392,6 @@ export function EditView() {
                 docPath,
                 markdown,
                 displayTarget: 'auto'
-              });
-              requestAnimationFrame(() => {
-                syncShareScroll(previewScrollRef.current);
               });
             }}
           >
@@ -386,14 +411,14 @@ export function EditView() {
         </div>
       </div>
 
-      <div className="split appMain" style={{ gridTemplateColumns: '1.8fr 1fr' }}>
-        <div className="card">
+      <div className="split appMain editorSplit" style={contentZoomStyle}>
+        <div className="card zoomCard">
           {leftMode === 'preview' ? (
-            <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden">
-              <div ref={previewRef} className="markdown" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
+            <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden zoomScroller">
+              <div ref={previewRef} className="markdown zoomContent" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
             </div>
           ) : (
-            <div className="cardBody fullHeight editorPane">
+            <div className="cardBody fullHeight editorPane zoomEditorPane">
               <CodeMirror
                 value={markdown}
                 theme={theme === 'dark' ? oneDark : cmLightTheme}
@@ -423,10 +448,10 @@ export function EditView() {
           )}
         </div>
 
-        <div className="card">
+        <div className="card zoomCard">
           <div
             ref={notesScrollRef}
-            className="cardBody fullHeight"
+            className="cardBody fullHeight zoomScroller"
             onWheel={(e) => {
               if (leftMode === 'edit') return;
               const scroller =
@@ -456,7 +481,7 @@ export function EditView() {
           >
             <div
               ref={notesPaneRef}
-              className="notesAlignContainer"
+              className="notesAlignContainer zoomContent"
               style={{ height: Math.max(previewScrollHeight, 1) }}
             >
               {(leftMode === 'preview' ? notesWithTop : notesWithTopForEditor).map(({ anchorId, top, notes }) => (

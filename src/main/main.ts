@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import type { Input } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -13,12 +14,23 @@ type PersistedState = {
   lastDocPath: string | null;
 };
 
+type ZoomAction = 'in' | 'out' | 'reset';
+type ContentZoomState = {
+  scale: number;
+};
+
+const EDIT_CONTENT_ZOOM_STEP = 0.1;
+const EDIT_CONTENT_ZOOM_MIN = 0.7;
+const EDIT_CONTENT_ZOOM_MAX = 2;
+const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
+
 let editWindow: BrowserWindow | null = null;
 let shareWindow: BrowserWindow | null = null;
 
 let currentDocPath: string | null = null;
 let currentMarkdown = '';
 let currentShareProgress = 0;
+let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
@@ -69,6 +81,89 @@ function getRendererUrl(view: 'edit' | 'share'): string {
   return `${base}${q}`;
 }
 
+function clampEditContentZoom(scale: number): number {
+  return Math.max(EDIT_CONTENT_ZOOM_MIN, Math.min(EDIT_CONTENT_ZOOM_MAX, Number(scale.toFixed(2))));
+}
+
+function currentEditContentZoomState(): ContentZoomState {
+  return { scale: editContentZoom };
+}
+
+function broadcastContentZoom() {
+  const state = currentEditContentZoomState();
+  editWindow?.webContents.send('contentZoom:update', state);
+  shareWindow?.webContents.send('contentZoom:update', state);
+}
+
+function setWindowPageZoom(window: BrowserWindow) {
+  window.webContents.setZoomLevel(0);
+}
+
+function adjustEditContentZoom(action: ZoomAction) {
+  if (action === 'reset') {
+    editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
+  } else {
+    const delta = action === 'in' ? EDIT_CONTENT_ZOOM_STEP : -EDIT_CONTENT_ZOOM_STEP;
+    editContentZoom = clampEditContentZoom(editContentZoom + delta);
+  }
+  if (editWindow) setWindowPageZoom(editWindow);
+  if (shareWindow) setWindowPageZoom(shareWindow);
+  broadcastContentZoom();
+}
+
+function adjustWindowZoom(window: BrowserWindow, action: ZoomAction) {
+  const { webContents } = window;
+  if (action === 'reset') {
+    webContents.setZoomLevel(0);
+    return;
+  }
+  const delta = action === 'in' ? 1 : -1;
+  webContents.setZoomLevel(webContents.getZoomLevel() + delta);
+}
+
+function getZoomAction(input: Input): ZoomAction | null {
+  if (!(input.control || input.meta) || input.type !== 'keyDown') return null;
+
+  switch (input.code) {
+    case 'Minus':
+    case 'NumpadSubtract':
+      return 'out';
+    case 'Equal':
+    case 'NumpadAdd':
+      return 'in';
+    case 'Digit0':
+    case 'Numpad0':
+      return 'reset';
+    default:
+      break;
+  }
+
+  switch (input.key) {
+    case '-':
+      return 'out';
+    case '=':
+    case '+':
+      return 'in';
+    case '0':
+      return 'reset';
+    default:
+      return null;
+  }
+}
+
+function registerZoomShortcuts(window: BrowserWindow, options?: { useContentZoom?: boolean }) {
+  window.webContents.on('before-input-event', (event, input) => {
+    const action = getZoomAction(input);
+    if (!action) return;
+    event.preventDefault();
+    if (options?.useContentZoom) {
+      adjustEditContentZoom(action);
+      return;
+    }
+    adjustWindowZoom(window, action);
+  });
+}
+
 function createEditWindow() {
   editWindow = new BrowserWindow({
     width: 1400,
@@ -79,6 +174,12 @@ function createEditWindow() {
       contextIsolation: true,
       nodeIntegration: false
     }
+  });
+  registerZoomShortcuts(editWindow, { useContentZoom: true });
+  setWindowPageZoom(editWindow);
+  editWindow.webContents.on('did-finish-load', () => {
+    setWindowPageZoom(editWindow!);
+    broadcastContentZoom();
   });
   editWindow.loadURL(getRendererUrl('edit'));
   editWindow.setMenuBarVisibility(false);
@@ -120,18 +221,23 @@ function createShareWindow(payload: ShareOpenPayload) {
     webPreferences: {
       preload: preloadPath(),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
 
+  registerZoomShortcuts(shareWindow, { useContentZoom: true });
+  setWindowPageZoom(shareWindow);
   shareWindow.loadURL(getRendererUrl('share'));
   shareWindow.setMenuBarVisibility(false);
 
   const pushInitial = () => {
+    setWindowPageZoom(shareWindow!);
     shareWindow?.webContents.send('share:init', {
       docPath: payload.docPath,
       markdown: payload.markdown,
-      progress: currentShareProgress
+      progress: currentShareProgress,
+      zoomScale: editContentZoom
     });
   };
 
@@ -201,6 +307,10 @@ app.whenReady().then(async () => {
     currentMarkdown = args.markdown;
     currentDocPath = args.docPath;
     forwardToShare('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
+  });
+
+  ipcMain.on('contentZoom:adjust', (_evt, action: ZoomAction) => {
+    adjustEditContentZoom(action);
   });
 
   ipcMain.on('share:open', (_evt, payload: ShareOpenPayload) => {

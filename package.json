@@ -1,6 +1,6 @@
 {
   "name": "markflow",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "private": true,
   "description": "Markdown editor with a private notes workspace and native share window.",
   "main": "dist/main/main.js",

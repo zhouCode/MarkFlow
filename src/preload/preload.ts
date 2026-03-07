@@ -4,12 +4,21 @@ export type ShareInit = {
   docPath: string | null;
   markdown: string;
   progress: number;
+  zoomScale: number;
+};
+
+export type ContentZoomState = {
+  scale: number;
 };
 
 contextBridge.exposeInMainWorld('markflow', {
   docOpen: () => ipcRenderer.invoke('doc:open'),
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
   docSetMarkdown: (args: { docPath: string | null; markdown: string }) => ipcRenderer.send('doc:setMarkdown', args),
+
+  contentZoomIn: () => ipcRenderer.send('contentZoom:adjust', 'in'),
+  contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),
+  contentZoomReset: () => ipcRenderer.send('contentZoom:adjust', 'reset'),
 
   shareOpen: (payload: {
     docPath: string | null;
@@ -28,6 +37,11 @@ contextBridge.exposeInMainWorld('markflow', {
     const handler = (_: unknown, payload: { docPath: string | null }) => cb(payload);
     ipcRenderer.on('doc:saved', handler);
     return () => ipcRenderer.removeListener('doc:saved', handler);
+  },
+  onContentZoomUpdate: (cb: (payload: ContentZoomState) => void) => {
+    const handler = (_: unknown, payload: ContentZoomState) => cb(payload);
+    ipcRenderer.on('contentZoom:update', handler);
+    return () => ipcRenderer.removeListener('contentZoom:update', handler);
   },
 
   onShareInit: (cb: (payload: ShareInit) => void) => {

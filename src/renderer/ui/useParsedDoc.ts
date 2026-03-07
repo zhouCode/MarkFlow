@@ -1,9 +1,10 @@
 import React from 'react';
 import { ParsedDoc, renderMarkdown } from '../markdown/parse';
 
-export function useParsedDoc(markdown: string) {
+export function useParsedDoc(markdown: string, options?: { debounceMs?: number }) {
   const [parsed, setParsed] = React.useState<ParsedDoc | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const debounceMs = options?.debounceMs ?? 120;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -18,12 +19,12 @@ export function useParsedDoc(markdown: string) {
           if (cancelled) return;
           setError(String(e?.message ?? e));
         });
-    }, 120);
+    }, debounceMs);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [markdown]);
+  }, [markdown, debounceMs]);
 
   return { parsed, error };
 }

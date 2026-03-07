@@ -5,6 +5,7 @@
 - [ ] Better display selection UI (choose target display explicitly)
 - [ ] Share-window controls for reopen / focus / quick-close behavior
 - [ ] Verify share-window behavior in real conferencing tools on macOS and Windows
+- [ ] Verify Windows share-window refresh while backgrounded in conferencing capture
 
 ## Notes (Private Speaker Notes)
 
@@ -15,6 +16,10 @@
 ## Editor
 
 - [x] Visible edit-mode scrollbar for precise dragging
+- [x] App-level zoom shortcuts for edit/share windows with hidden menu bars
+- [x] Keep editor and notes panes side by side while staying usable in zoomed smaller windows
+- [x] Keep the edit-window toolbar fixed while zoom shortcuts scale editor content only
+- [x] Keep the share-window toolbar fixed while zoom shortcuts scale shared content only
 - [ ] WYSIWYG / seamless editing mode (ProseMirror/TipTap-based)
 - [ ] Outline / TOC panel
 - [ ] Image paste + asset management
