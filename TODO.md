@@ -14,6 +14,7 @@
 
 ## Editor
 
+- [x] Visible edit-mode scrollbar for precise dragging
 - [ ] WYSIWYG / seamless editing mode (ProseMirror/TipTap-based)
 - [ ] Outline / TOC panel
 - [ ] Image paste + asset management
