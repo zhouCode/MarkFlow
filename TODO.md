@@ -5,7 +5,7 @@
 - [ ] Better display selection UI (choose target display explicitly)
 - [ ] Share-window controls for reopen / focus / quick-close behavior
 - [ ] Verify share-window behavior in real conferencing tools on macOS and Windows
-- [ ] Verify Windows share-window refresh while backgrounded in conferencing capture
+- [ ] Verify Windows conferencing capture after disabling background throttling for both windows
 
 ## Notes (Private Speaker Notes)
 

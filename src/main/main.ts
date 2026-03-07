@@ -172,7 +172,8 @@ function createEditWindow() {
     webPreferences: {
       preload: preloadPath(),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      backgroundThrottling: false
     }
   });
   registerZoomShortcuts(editWindow, { useContentZoom: true });
