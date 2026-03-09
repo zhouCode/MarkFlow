@@ -13,7 +13,7 @@ export function EditView() {
   const [docPath, setDocPath] = React.useState<string | null>(null);
   const [markdown, setMarkdown] = React.useState<string>('');
   const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState<string>('');
-  const { parsed } = useParsedDoc(markdown);
+  const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [shareWindowOpen, setShareWindowOpen] = React.useState(false);
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});

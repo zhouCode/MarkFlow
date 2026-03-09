@@ -222,6 +222,12 @@ body {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.markdown img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
 .split {
   display: grid;
   grid-template-columns: 1.6fr 1fr;

@@ -4,9 +4,10 @@ import { useTheme } from './theme';
 
 export function AudienceView() {
   const { theme, toggle: toggleTheme } = useTheme();
+  const [docPath, setDocPath] = React.useState<string | null>(null);
   const [markdown, setMarkdown] = React.useState<string>('');
   const [contentZoomScale, setContentZoomScale] = React.useState(1);
-  const { parsed } = useParsedDoc(markdown, { debounceMs: 10 });
+  const { parsed } = useParsedDoc(markdown, docPath, { debounceMs: 10 });
   const bodyRef = React.useRef<HTMLDivElement | null>(null);
   const latestProgressRef = React.useRef(0);
 
@@ -21,9 +22,13 @@ export function AudienceView() {
     const offInit = window.markflow.onShareInit((p) => {
       latestProgressRef.current = typeof p.progress === 'number' ? p.progress : 0;
       setContentZoomScale(typeof p.zoomScale === 'number' ? p.zoomScale : 1);
+      setDocPath(p.docPath);
       setMarkdown(p.markdown);
     });
-    const offDoc = window.markflow.onDocUpdate((p) => setMarkdown(p.markdown));
+    const offDoc = window.markflow.onDocUpdate((p) => {
+      setDocPath(p.docPath);
+      setMarkdown(p.markdown);
+    });
     const offScroll = window.markflow.onShareScrollTo((p) => {
       latestProgressRef.current = typeof p?.progress === 'number' ? p.progress : 0;
       applyScrollProgress();

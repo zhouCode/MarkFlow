@@ -1,8 +1,28 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, screen } from 'electron';
 import type { Input } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+
+const singleInstanceLock = app.requestSingleInstanceLock();
+if (!singleInstanceLock) {
+  app.quit();
+}
+
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  setPendingOpenPath(filePath);
+  void openPendingDocumentIfAny();
+});
+
+app.on('second-instance', (_event, argv) => {
+  setPendingOpenPath(extractMarkdownPathFromArgv(argv));
+  if (editWindow) {
+    if (editWindow.isMinimized()) editWindow.restore();
+    editWindow.focus();
+  }
+  void openPendingDocumentIfAny();
+});
 
 type ShareOpenPayload = {
   docPath: string | null;
@@ -19,10 +39,26 @@ type ContentZoomState = {
   scale: number;
 };
 
+type PendingOpenState = {
+  filePath: string | null;
+};
+
 const EDIT_CONTENT_ZOOM_STEP = 0.1;
 const EDIT_CONTENT_ZOOM_MIN = 0.7;
 const EDIT_CONTENT_ZOOM_MAX = 2;
 const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
+const MARKFLOW_ASSET_PROTOCOL = 'markflow-asset';
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: MARKFLOW_ASSET_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true
+    }
+  }
+]);
 
 let editWindow: BrowserWindow | null = null;
 let shareWindow: BrowserWindow | null = null;
@@ -31,6 +67,7 @@ let currentDocPath: string | null = null;
 let currentMarkdown = '';
 let currentShareProgress = 0;
 let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
+let pendingOpenState: PendingOpenState = { filePath: null };
 
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
@@ -51,12 +88,59 @@ async function writePersistedState(state: PersistedState): Promise<void> {
   await fs.writeFile(stateFilePath(), JSON.stringify(state), 'utf-8');
 }
 
+function looksLikeMarkdownPath(filePath: string | null | undefined): filePath is string {
+  if (!filePath) return false;
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.md' || ext === '.markdown' || ext === '.mdx';
+}
+
+function extractMarkdownPathFromArgv(argv: string[]): string | null {
+  for (const arg of argv) {
+    if (looksLikeMarkdownPath(arg)) return arg;
+  }
+  return null;
+}
+
+function setPendingOpenPath(filePath: string | null | undefined) {
+  if (!looksLikeMarkdownPath(filePath)) return;
+  pendingOpenState.filePath = filePath;
+}
+
+function clearPendingOpenPath(filePath: string | null) {
+  if (pendingOpenState.filePath === filePath) pendingOpenState.filePath = null;
+}
+
 async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
   currentDocPath = filePath;
   currentMarkdown = markdown;
   await writePersistedState({ lastDocPath: filePath });
   return { docPath: currentDocPath, markdown: currentMarkdown };
+}
+
+async function loadDocumentIntoWindows(filePath: string) {
+  const payload = await loadDocument(filePath);
+  editWindow?.webContents.send('doc:update', payload);
+  forwardToShare('doc:update', payload);
+  clearPendingOpenPath(filePath);
+  return payload;
+}
+
+function isRendererReady(window: BrowserWindow | null): boolean {
+  return Boolean(window && !window.webContents.isLoadingMainFrame());
+}
+
+async function openPendingDocumentIfAny() {
+  const filePath = pendingOpenState.filePath;
+  if (!filePath || !isRendererReady(editWindow)) return false;
+
+  try {
+    await loadDocumentIntoWindows(filePath);
+    return true;
+  } catch {
+    clearPendingOpenPath(filePath);
+    return false;
+  }
 }
 
 function isDev(): boolean {
@@ -181,6 +265,7 @@ function createEditWindow() {
   editWindow.webContents.on('did-finish-load', () => {
     setWindowPageZoom(editWindow!);
     broadcastContentZoom();
+    void openPendingDocumentIfAny();
   });
   editWindow.loadURL(getRendererUrl('edit'));
   editWindow.setMenuBarVisibility(false);
@@ -255,8 +340,64 @@ function createShareWindow(payload: ShareOpenPayload) {
   });
 }
 
+function contentTypeForAsset(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.bmp':
+      return 'image/bmp';
+    case '.ico':
+      return 'image/x-icon';
+    case '.avif':
+      return 'image/avif';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function createAssetResponse(bytes: Buffer, filePath: string): Response {
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: {
+      'Content-Type': contentTypeForAsset(filePath),
+      'Cache-Control': 'no-cache'
+    }
+  });
+}
+
+function registerMarkdownAssetProtocol() {
+  protocol.handle(MARKFLOW_ASSET_PROTOCOL, async (request) => {
+    try {
+      const url = new URL(request.url);
+      const assetPath = url.searchParams.get('path');
+      if (!assetPath) {
+        return new Response('Not found', { status: 404 });
+      }
+      const bytes = await fs.readFile(assetPath);
+      return createAssetResponse(bytes, assetPath);
+    } catch {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  registerMarkdownAssetProtocol();
+  setPendingOpenPath(extractMarkdownPathFromArgv(process.argv.slice(1)));
   createEditWindow();
+
+  if (pendingOpenState.filePath) {
+    return;
+  }
 
   const persisted = await readPersistedState();
   if (persisted.lastDocPath) {
@@ -279,10 +420,7 @@ app.whenReady().then(async () => {
     });
     if (res.canceled || res.filePaths.length === 0) return null;
     const filePath = res.filePaths[0]!;
-    const payload = await loadDocument(filePath);
-    editWindow.webContents.send('doc:update', payload);
-    forwardToShare('doc:update', payload);
-    return payload;
+    return loadDocumentIntoWindows(filePath);
   });
 
   ipcMain.handle('doc:save', async (_evt, args: { docPath: string | null; markdown: string }) => {

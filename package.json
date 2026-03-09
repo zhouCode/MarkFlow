@@ -1,6 +1,6 @@
 {
   "name": "markflow",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "Markdown editor with a private notes workspace and native share window.",
   "main": "dist/main/main.js",
@@ -61,7 +61,8 @@
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
     "unified": "^11.0.5",
-    "unist-util-visit": "^5.0.0"
+    "unist-util-visit": "^5.0.0",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
