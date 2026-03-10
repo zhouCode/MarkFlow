@@ -491,6 +491,9 @@ type UpdateDownloadProgress = {
 };
 
 ipcMain.handle('update:check', async (): Promise<UpdateCheckResult> => {
+  if (isDev()) {
+    return { status: 'error', message: 'Update check is not available in development mode' };
+  }
   try {
     const result = await autoUpdater.checkForUpdates();
     if (result && result.updateInfo.version !== app.getVersion()) {
@@ -503,6 +506,9 @@ ipcMain.handle('update:check', async (): Promise<UpdateCheckResult> => {
 });
 
 ipcMain.handle('update:download', async () => {
+  if (isDev()) {
+    return { success: false, message: 'Update download is not available in development mode' };
+  }
   try {
     await autoUpdater.downloadUpdate();
     return { success: true };
