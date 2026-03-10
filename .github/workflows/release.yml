@@ -25,7 +25,8 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run dist
+      - run: npm run build
+      - run: npx electron-builder --publish always
 
       - uses: actions/upload-artifact@v4
         with:
@@ -34,6 +35,8 @@ jobs:
           path: |
             dist_electron/*.zip
             dist_electron/*.exe
+            dist_electron/*.yml
+            dist_electron/*.blockmap
 
   release:
     name: Publish GitHub Release
@@ -59,3 +62,5 @@ jobs:
           files: |
             artifacts/**/*.zip
             artifacts/**/*.exe
+            artifacts/**/*.yml
+            artifacts/**/*.blockmap
