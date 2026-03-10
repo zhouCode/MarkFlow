@@ -18,6 +18,9 @@ export function EditView() {
   const [shareWindowOpen, setShareWindowOpen] = React.useState(false);
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});
   const [contentZoomScale, setContentZoomScale] = React.useState(1);
+  const [updateStatus, setUpdateStatus] = React.useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready'>('idle');
+  const [updateVersion, setUpdateVersion] = React.useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = React.useState<number>(0);
   const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
   const previewRef = React.useRef<HTMLDivElement | null>(null);
   const notesScrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -69,6 +72,44 @@ export function EditView() {
       setShareWindowOpen(false);
     });
     return () => offShareClosed();
+  }, []);
+
+  React.useEffect(() => {
+    const offProgress = window.markflow.onUpdateDownloadProgress((p) => {
+      setDownloadProgress(p.percent);
+    });
+    return () => offProgress();
+  }, []);
+
+  const handleCheckUpdate = React.useCallback(async () => {
+    setUpdateStatus('checking');
+    const result = await window.markflow.updateCheck();
+    if (result.status === 'available') {
+      setUpdateStatus('available');
+      setUpdateVersion(result.version);
+    } else if (result.status === 'not-available') {
+      setUpdateStatus('idle');
+      alert('当前已是最新版本');
+    } else {
+      setUpdateStatus('idle');
+      alert(`检查更新失败: ${result.message}`);
+    }
+  }, []);
+
+  const handleDownloadUpdate = React.useCallback(async () => {
+    setUpdateStatus('downloading');
+    setDownloadProgress(0);
+    const result = await window.markflow.updateDownload();
+    if (result.success) {
+      setUpdateStatus('ready');
+    } else {
+      setUpdateStatus('available');
+      alert(`下载失败: ${result.message ?? '未知错误'}`);
+    }
+  }, []);
+
+  const handleInstallUpdate = React.useCallback(() => {
+    window.markflow.updateInstall();
   }, []);
 
   React.useEffect(() => {
@@ -380,6 +421,22 @@ export function EditView() {
           <button className="btn" onClick={() => toggleTheme()}>
             Theme: {theme}
           </button>
+          <button className="btn" onClick={handleCheckUpdate} disabled={updateStatus === 'checking'}>
+            {updateStatus === 'checking' ? '检查中...' : '检查更新'}
+          </button>
+          {updateStatus === 'available' && (
+            <button className="btn" onClick={handleDownloadUpdate}>
+              下载 v{updateVersion}
+            </button>
+          )}
+          {updateStatus === 'downloading' && (
+            <span className="pill">下载中 {Math.round(downloadProgress)}%</span>
+          )}
+          {updateStatus === 'ready' && (
+            <button className="btn" onClick={handleInstallUpdate}>
+              重启安装
+            </button>
+          )}
           <button className="btn" onClick={() => setLeftMode((m) => (m === 'edit' ? 'preview' : 'edit'))}>
             Left: {leftMode === 'edit' ? 'Edit' : 'Preview'} (Ctrl/Cmd+E)
           </button>

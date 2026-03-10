@@ -11,6 +11,17 @@ export type ContentZoomState = {
   scale: number;
 };
 
+export type UpdateCheckResult =
+  | { status: 'available'; version: string }
+  | { status: 'not-available' }
+  | { status: 'error'; message: string };
+
+export type UpdateDownloadProgress = {
+  percent: number;
+  transferred: number;
+  total: number;
+};
+
 contextBridge.exposeInMainWorld('markflow', {
   docOpen: () => ipcRenderer.invoke('doc:open'),
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
@@ -58,5 +69,14 @@ contextBridge.exposeInMainWorld('markflow', {
     const handler = () => cb();
     ipcRenderer.on('share:closed', handler);
     return () => ipcRenderer.removeListener('share:closed', handler);
+  },
+
+  updateCheck: () => ipcRenderer.invoke('update:check'),
+  updateDownload: () => ipcRenderer.invoke('update:download'),
+  updateInstall: () => ipcRenderer.invoke('update:install'),
+  onUpdateDownloadProgress: (cb: (payload: UpdateDownloadProgress) => void) => {
+    const handler = (_: unknown, payload: UpdateDownloadProgress) => cb(payload);
+    ipcRenderer.on('update:download-progress', handler);
+    return () => ipcRenderer.removeListener('update:download-progress', handler);
   }
 });

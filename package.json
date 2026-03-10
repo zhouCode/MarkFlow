@@ -1,6 +1,6 @@
 {
   "name": "markflow",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "private": true,
   "description": "Markdown editor with a private notes workspace and native share window.",
   "main": "dist/main/main.js",
@@ -22,6 +22,11 @@
       "dist/**/*",
       "package.json"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "zhouCode",
+      "repo": "MarkFlow"
+    },
     "mac": {
       "target": [
         "zip"
@@ -48,6 +53,7 @@
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.38.1",
     "@uiw/react-codemirror": "^4.23.0",
+    "electron-updater": "^6.8.3",
     "highlight.js": "^11.10.0",
     "highlightjs-solidity": "^2.0.6",
     "nanoid": "^5.0.7",

@@ -26,6 +26,15 @@ declare global {
       onShareInit: (cb: (payload: { docPath: string | null; markdown: string; progress: number; zoomScale: number }) => void) => () => void;
       onShareScrollTo: (cb: (payload: { progress: number }) => void) => () => void;
       onShareClosed: (cb: () => void) => () => void;
+
+      updateCheck: () => Promise<
+        | { status: 'available'; version: string }
+        | { status: 'not-available' }
+        | { status: 'error'; message: string }
+      >;
+      updateDownload: () => Promise<{ success: boolean; message?: string }>;
+      updateInstall: () => void;
+      onUpdateDownloadProgress: (cb: (payload: { percent: number; transferred: number; total: number }) => void) => () => void;
     };
   }
 }

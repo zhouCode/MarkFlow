@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, protocol, screen } from 'electron';
 import type { Input } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -473,6 +474,54 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createEditWindow();
   });
+});
+
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = false;
+
+type UpdateCheckResult =
+  | { status: 'available'; version: string }
+  | { status: 'not-available' }
+  | { status: 'error'; message: string };
+
+type UpdateDownloadProgress = {
+  percent: number;
+  transferred: number;
+  total: number;
+};
+
+ipcMain.handle('update:check', async (): Promise<UpdateCheckResult> => {
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (result && result.updateInfo.version !== app.getVersion()) {
+      return { status: 'available', version: result.updateInfo.version };
+    }
+    return { status: 'not-available' };
+  } catch (err) {
+    return { status: 'error', message: err instanceof Error ? err.message : 'Unknown error' };
+  }
+});
+
+ipcMain.handle('update:download', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { success: true };
+  } catch (err) {
+    return { success: false, message: err instanceof Error ? err.message : 'Unknown error' };
+  }
+});
+
+ipcMain.handle('update:install', () => {
+  autoUpdater.quitAndInstall(false, true);
+});
+
+autoUpdater.on('download-progress', (progress) => {
+  const payload: UpdateDownloadProgress = {
+    percent: progress.percent,
+    transferred: progress.transferred,
+    total: progress.total
+  };
+  editWindow?.webContents.send('update:download-progress', payload);
 });
 
 app.on('window-all-closed', () => {
