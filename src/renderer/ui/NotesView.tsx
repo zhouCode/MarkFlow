@@ -37,7 +37,7 @@ export function NotesView() {
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if (e.key === 'Escape') {
+      if (e.key === 'F5' || e.key === 'Escape') {
         e.preventDefault();
         window.markflow.notesClose();
       }

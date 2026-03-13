@@ -88,7 +88,7 @@ const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
 const MARKFLOW_ASSET_PROTOCOL = 'markflow-asset';
 const WINDOW_DOCK_THRESHOLD = 28;
 const MAC_WINDOW_DOCK_GAP = 4;
-const WINDOWS_WINDOW_DOCK_GAP = -6;
+const WINDOWS_WINDOW_DOCK_GAP = -10;
 const DEFAULT_WINDOW_DOCK_GAP = 4;
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
@@ -581,7 +581,10 @@ function notifyNotesClosed() {
 function createNotesWindow() {
   if (notesWindow && !notesWindow.isDestroyed()) {
     if (notesWindow.isMinimized()) notesWindow.restore();
-    notesWindow.focus();
+    if (!notesWindow.isVisible()) {
+      notesWindow.showInactive();
+    }
+    editWindow?.focus();
     return;
   }
 
@@ -620,8 +623,8 @@ function createNotesWindow() {
     if (notesDockState) {
       syncDockedNotesWindow();
     }
-    notesWindow?.show();
-    notesWindow?.focus();
+    notesWindow?.showInactive();
+    editWindow?.focus();
   });
   notesWindow.on('move', refreshNotesDockState);
   notesWindow.on('resize', refreshNotesDockState);

@@ -514,9 +514,19 @@ export function EditView() {
         window.markflow.docSave({ docPath, markdown });
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setSidebarOpen((open) => !open);
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
         setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'));
+        return;
+      }
+      if (e.key === 'F1') {
+        e.preventDefault();
+        setAboutOpen((open) => !open);
         return;
       }
       if (e.key === 'Escape' && notesWindowOpen) {
@@ -698,6 +708,7 @@ export function EditView() {
           <div className="toolbarGroup">
             <button
               className="btn"
+              title="Open File (Ctrl/Cmd+O)"
               onClick={() => {
                 void handleOpenFile();
               }}
@@ -706,6 +717,7 @@ export function EditView() {
             </button>
             <button
               className="btn"
+              title="Open Folder"
               onClick={() => {
                 void handleOpenFolder();
               }}
@@ -714,11 +726,16 @@ export function EditView() {
             </button>
           </div>
           <div className="toolbarGroup">
-            <button className={`btn ${sidebarOpen ? 'active' : ''}`} onClick={() => setSidebarOpen((open) => !open)}>
+            <button
+              className={`btn ${sidebarOpen ? 'active' : ''}`}
+              title="Toggle Files Sidebar (Ctrl/Cmd+B)"
+              onClick={() => setSidebarOpen((open) => !open)}
+            >
               Files
             </button>
             <button
               className="btn"
+              title="Toggle Edit / Preview (Ctrl/Cmd+E)"
               onClick={() => setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'))}
             >
               {leftMode === 'edit' ? 'Preview' : 'Edit'}
@@ -727,14 +744,19 @@ export function EditView() {
         </div>
         <div className="topbarAside">
           <div className="toolbarGroup">
-            <button className={`btn ${aboutOpen ? 'active' : ''}`} onClick={() => setAboutOpen((open) => !open)}>
+            <button
+              className={`btn ${aboutOpen ? 'active' : ''}`}
+              title="About MarkFlow (F1)"
+              onClick={() => setAboutOpen((open) => !open)}
+            >
               About
             </button>
-            <button className="btn" onClick={() => toggleTheme()}>
+            <button className="btn" title="Toggle Theme" onClick={() => toggleTheme()}>
               Theme
             </button>
             <button
               className={`btn ${updateStatus === 'ready' ? 'danger' : ''}`}
+              title={updateStatus === 'ready' ? 'Restart to Install Update' : 'Check for Updates'}
               onClick={handleUpdateAction}
               disabled={updateStatus === 'checking'}
             >
@@ -743,6 +765,7 @@ export function EditView() {
           </div>
           <button
             className={`btn ${notesWindowOpen ? 'active' : ''}`}
+            title="Toggle Notes Window (F5)"
             onClick={() => {
               setNotesWindowOpen((open) => {
                 const next = !open;
