@@ -50,6 +50,10 @@ export function NotesView() {
     () => ({ '--content-zoom': String(state.zoomScale) } as React.CSSProperties),
     [state.zoomScale]
   );
+  const noteCount = React.useMemo(
+    () => state.groups.reduce((total, group) => total + group.notes.length, 0),
+    [state.groups]
+  );
 
   return (
     <div className="notesWindowShell" style={contentZoomStyle}>
@@ -91,6 +95,15 @@ export function NotesView() {
                 No notes found. Use <code>&lt;!-- note: ... --&gt;</code>.
               </div>
             ) : null}
+          </div>
+        </div>
+        <div className="subbar notesWindowFooter">
+          <div className="left">
+            <span className="pill">{state.groups.length} anchors</span>
+            <span className="pill">{noteCount} notes</span>
+          </div>
+          <div className="right">
+            <span className="pill">Zoom {Math.round(state.zoomScale * 100)}%</span>
           </div>
         </div>
       </div>

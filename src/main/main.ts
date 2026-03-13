@@ -54,6 +54,9 @@ type ContentZoomState = {
 type FileBrowserEntry = {
   name: string;
   path: string;
+  kind: 'directory' | 'file';
+  depth: number;
+  parentPath: string | null;
   isMarkdown: boolean;
 };
 
@@ -84,7 +87,9 @@ const EDIT_CONTENT_ZOOM_MAX = 2;
 const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
 const MARKFLOW_ASSET_PROTOCOL = 'markflow-asset';
 const WINDOW_DOCK_THRESHOLD = 28;
-const WINDOW_DOCK_GAP = 4;
+const MAC_WINDOW_DOCK_GAP = 4;
+const WINDOWS_WINDOW_DOCK_GAP = 0;
+const DEFAULT_WINDOW_DOCK_GAP = 4;
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
 
@@ -159,19 +164,43 @@ async function loadDocument(filePath: string) {
   return { docPath: currentDocPath, markdown: currentMarkdown };
 }
 
-async function listDirectoryFiles(dirPath: string): Promise<FileBrowserEntry[]> {
+async function listDirectoryTree(dirPath: string, depth = 0, parentPath: string | null = null): Promise<FileBrowserEntry[]> {
   const entries = await fs.readdir(dirPath, { withFileTypes: true });
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => {
-      const filePath = path.join(dirPath, entry.name);
-      return {
+  const sortedEntries = entries.sort((a, b) => {
+    if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
+  const result: FileBrowserEntry[] = [];
+  for (const entry of sortedEntries) {
+    const entryPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const children = await listDirectoryTree(entryPath, depth + 1, entryPath);
+      if (children.length === 0) continue;
+      result.push({
         name: entry.name,
-        path: filePath,
-        isMarkdown: looksLikeMarkdownPath(filePath)
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+        path: entryPath,
+        kind: 'directory',
+        depth,
+        parentPath,
+        isMarkdown: false
+      });
+      result.push(...children);
+      continue;
+    }
+
+    if (!entry.isFile() || !looksLikeMarkdownPath(entryPath)) continue;
+    result.push({
+      name: entry.name,
+      path: entryPath,
+      kind: 'file',
+      depth,
+      parentPath,
+      isMarkdown: true
+    });
+  }
+
+  return result;
 }
 
 async function loadDocumentIntoWindows(filePath: string) {
@@ -228,6 +257,12 @@ function clampEditContentZoom(scale: number): number {
 function clampNumber(value: number, min: number, max: number): number {
   if (min > max) return value;
   return Math.max(min, Math.min(max, value));
+}
+
+function currentWindowDockGap(): number {
+  if (process.platform === 'win32') return WINDOWS_WINDOW_DOCK_GAP;
+  if (process.platform === 'darwin') return MAC_WINDOW_DOCK_GAP;
+  return DEFAULT_WINDOW_DOCK_GAP;
 }
 
 function currentEditContentZoomState(): ContentZoomState {
@@ -315,7 +350,7 @@ function rangesNearOrOverlap(startA: number, endA: number, startB: number, endB:
 
 function getDockCandidate(companionBounds: Rectangle, anchorBounds: Rectangle): DockCandidate | null {
   const candidates: DockCandidate[] = [];
-  const gap = WINDOW_DOCK_GAP;
+  const gap = currentWindowDockGap();
 
   if (
     rangesNearOrOverlap(
@@ -456,11 +491,12 @@ function notesPlacementNearEditWindow(): CompanionPlacement | null {
   const editBounds = editWindow.getBounds();
   const display = screen.getDisplayMatching(editBounds);
   const workArea = display.workArea;
+  const gap = currentWindowDockGap();
   const width = clampNumber(Math.round(editBounds.width * 0.33), 260, Math.max(260, workArea.width - 40));
   const height = clampNumber(Math.round(editBounds.height * 0.92), 520, Math.max(520, workArea.height - 40));
   const alignedY = clampNumber(editBounds.y, workArea.y + 20, workArea.y + workArea.height - height - 20);
-  const rightX = editBounds.x + editBounds.width + WINDOW_DOCK_GAP;
-  const leftX = editBounds.x - width - WINDOW_DOCK_GAP;
+  const rightX = editBounds.x + editBounds.width + gap;
+  const leftX = editBounds.x - width - gap;
   const canDockRight = rightX + width <= workArea.x + workArea.width - 12;
   const canDockLeft = leftX >= workArea.x + 12;
   const edge: DockEdge = canDockRight || !canDockLeft ? 'right' : 'left';
@@ -476,7 +512,7 @@ function notesPlacementNearEditWindow(): CompanionPlacement | null {
     dockState: {
       edge,
       offset: alignedY - editBounds.y,
-      gap: WINDOW_DOCK_GAP
+      gap
     }
   };
 }
@@ -723,7 +759,7 @@ app.whenReady().then(async () => {
     }
     return {
       dirPath,
-      entries: await listDirectoryFiles(dirPath)
+      entries: await listDirectoryTree(dirPath)
     };
   });
 

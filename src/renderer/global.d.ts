@@ -25,6 +25,9 @@ declare global {
   type FileBrowserEntry = {
     name: string;
     path: string;
+    kind: 'directory' | 'file';
+    depth: number;
+    parentPath: string | null;
     isMarkdown: boolean;
   };
 

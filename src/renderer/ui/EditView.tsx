@@ -26,6 +26,14 @@ function getBaseName(filePath: string | null): string {
   return separatorIndex >= 0 ? normalized.slice(separatorIndex + 1) : normalized;
 }
 
+function isPathInsideDir(filePath: string, dirPath: string): boolean {
+  const normalizedFile = filePath.replace(/[\\/]+$/, '');
+  const normalizedDir = dirPath.replace(/[\\/]+$/, '');
+  if (normalizedFile === normalizedDir) return true;
+  const separator = normalizedDir.includes('\\') ? '\\' : '/';
+  return normalizedFile.startsWith(`${normalizedDir}${separator}`);
+}
+
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
@@ -36,6 +44,7 @@ export function EditView() {
   const [workspaceStatus, setWorkspaceStatus] = React.useState<WorkspaceStatus>('idle');
   const [workspaceError, setWorkspaceError] = React.useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
+  const [collapsedDirPaths, setCollapsedDirPaths] = React.useState<Set<string>>(() => new Set());
   const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [notesWindowOpen, setNotesWindowOpen] = React.useState(false);
@@ -98,10 +107,20 @@ export function EditView() {
       const result = await window.markflow.folderList({ dirPath });
       setWorkspaceDirPath(result.dirPath);
       setWorkspaceEntries(result.entries);
+      setCollapsedDirPaths((prev) => {
+        const next = new Set(
+          result.entries.filter((entry) => entry.kind === 'directory' && !prev.has(entry.path)).map((entry) => entry.path)
+        );
+        for (const existingPath of prev) {
+          if (result.entries.some((entry) => entry.path === existingPath && entry.kind === 'directory')) next.add(existingPath);
+        }
+        return next;
+      });
       setWorkspaceStatus('ready');
     } catch (error) {
       setWorkspaceDirPath(dirPath);
       setWorkspaceEntries([]);
+      setCollapsedDirPaths(new Set());
       setWorkspaceStatus('error');
       setWorkspaceError(error instanceof Error ? error.message : '读取文件夹失败');
     }
@@ -109,10 +128,11 @@ export function EditView() {
 
   React.useEffect(() => {
     if (!docPath) return;
+    if (workspaceDirPath && isPathInsideDir(docPath, workspaceDirPath)) return;
     const dirPath = getParentDirPath(docPath);
     if (!dirPath) return;
     void refreshWorkspace(dirPath);
-  }, [docPath, refreshWorkspace]);
+  }, [docPath, refreshWorkspace, workspaceDirPath]);
 
   const handleCheckUpdate = React.useCallback(async () => {
     setUpdateStatus('checking');
@@ -178,6 +198,7 @@ export function EditView() {
       const result = await window.markflow.folderOpen();
       if (!result) return;
       setSidebarOpen(true);
+      setCollapsedDirPaths(new Set());
       await refreshWorkspace(result.dirPath);
     } catch (error) {
       alert(error instanceof Error ? error.message : '打开文件夹失败');
@@ -186,7 +207,7 @@ export function EditView() {
 
   const handleOpenWorkspaceEntry = React.useCallback(
     async (entry: FileBrowserEntry) => {
-      if (!entry.isMarkdown) return;
+      if (entry.kind !== 'file' || !entry.isMarkdown) return;
       if (!(await confirmSwitchIfDirty())) return;
       try {
         await window.markflow.docOpenPath({ filePath: entry.path });
@@ -470,8 +491,25 @@ export function EditView() {
   }, [docPath, markdown, notesWindowOpen]);
 
   const dirty = markdown !== lastSavedMarkdown;
+  const entryByPath = React.useMemo(() => new Map(workspaceEntries.map((entry) => [entry.path, entry])), [workspaceEntries]);
+  const visibleWorkspaceEntries = React.useMemo(
+    () =>
+      workspaceEntries.filter((entry) => {
+        let currentParentPath = entry.parentPath;
+        while (currentParentPath) {
+          if (collapsedDirPaths.has(currentParentPath)) return false;
+          currentParentPath = entryByPath.get(currentParentPath)?.parentPath ?? null;
+        }
+        return true;
+      }),
+    [collapsedDirPaths, entryByPath, workspaceEntries]
+  );
   const workspaceMarkdownCount = React.useMemo(
     () => workspaceEntries.filter((entry) => entry.isMarkdown).length,
+    [workspaceEntries]
+  );
+  const workspaceFolderCount = React.useMemo(
+    () => workspaceEntries.filter((entry) => entry.kind === 'directory').length,
     [workspaceEntries]
   );
   const currentDocName = React.useMemo(() => getBaseName(docPath), [docPath]);
@@ -559,68 +597,103 @@ export function EditView() {
     });
   }, [leftMode, activeAnchor, notesGroups, contentScrollHeight, currentScrollTop, contentZoomScale]);
 
+  const handleUpdateAction = React.useCallback(() => {
+    if (updateStatus === 'available') {
+      void handleDownloadUpdate();
+      return;
+    }
+    if (updateStatus === 'ready') {
+      handleInstallUpdate();
+      return;
+    }
+    if (updateStatus === 'idle') {
+      void handleCheckUpdate();
+    }
+  }, [handleCheckUpdate, handleDownloadUpdate, handleInstallUpdate, updateStatus]);
+
+  const updateButtonLabel = React.useMemo(() => {
+    if (updateStatus === 'checking') return 'Checking...';
+    if (updateStatus === 'available') return updateVersion ? `Update ${updateVersion}` : 'Update';
+    if (updateStatus === 'downloading') return `Update ${Math.round(downloadProgress)}%`;
+    if (updateStatus === 'ready') return 'Restart';
+    return 'Update';
+  }, [downloadProgress, updateStatus, updateVersion]);
+
+  React.useEffect(() => {
+    if (!workspaceDirPath) {
+      setCollapsedDirPaths(new Set());
+    }
+  }, [workspaceDirPath]);
+
+  React.useEffect(() => {
+    if (!docPath) return;
+    const currentEntry = entryByPath.get(docPath);
+    if (!currentEntry) return;
+    setCollapsedDirPaths((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      let currentParentPath = currentEntry.parentPath;
+      while (currentParentPath) {
+        if (next.delete(currentParentPath)) changed = true;
+        currentParentPath = entryByPath.get(currentParentPath)?.parentPath ?? null;
+      }
+      return changed ? next : prev;
+    });
+  }, [docPath, entryByPath]);
+
   return (
     <div className="appShell">
       <div className="topbar">
-        <div className="left">
-          <button
-            className="btn"
-            onClick={() => {
-              void handleOpenFile();
-            }}
-          >
-            Open
-          </button>
-          <button
-            className="btn"
-            onClick={() => {
-              void handleOpenFolder();
-            }}
-          >
-            Open Folder
-          </button>
-          <button
-            className="btn"
-            onClick={async () => {
-              await window.markflow.docSave({ docPath, markdown });
-            }}
-          >
-            Save
-          </button>
-          <button className={`btn ${sidebarOpen ? '' : 'danger'}`} onClick={() => setSidebarOpen((open) => !open)}>
-            {sidebarOpen ? 'Hide Files' : 'Show Files'}
-          </button>
-          {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
-          <span className="pill">{currentDocName}</span>
-          {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
-          <span className="pill">Notes companion</span>
-          <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
+        <div className="topbarBrand">
+          <span className="topbarTitle">MarkFlow</span>
+          <span className="topbarCaption">{leftMode === 'edit' ? 'Editor' : 'Preview'}</span>
         </div>
-        <div className="right">
-          <button className="btn" onClick={() => toggleTheme()}>
-            Theme: {theme}
-          </button>
-          <button className="btn" onClick={handleCheckUpdate} disabled={updateStatus === 'checking'}>
-            {updateStatus === 'checking' ? '检查中...' : '检查更新'}
-          </button>
-          {updateStatus === 'available' && (
-            <button className="btn" onClick={handleDownloadUpdate}>
-              下载 v{updateVersion}
+        <div className="topbarMain">
+          <div className="toolbarGroup">
+            <button
+              className="btn"
+              onClick={() => {
+                void handleOpenFile();
+              }}
+            >
+              Open
             </button>
-          )}
-          {updateStatus === 'downloading' && (
-            <span className="pill">下载中 {Math.round(downloadProgress)}%</span>
-          )}
-          {updateStatus === 'ready' && (
-            <button className="btn" onClick={handleInstallUpdate}>
-              重启安装
+            <button
+              className="btn"
+              onClick={() => {
+                void handleOpenFolder();
+              }}
+            >
+              Folder
             </button>
-          )}
-          <button className="btn" onClick={() => setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'))}>
-            Left: {leftMode === 'edit' ? 'Edit' : 'Preview'} (Ctrl/Cmd+E)
-          </button>
+          </div>
+          <div className="toolbarGroup">
+            <button className={`btn ${sidebarOpen ? 'active' : ''}`} onClick={() => setSidebarOpen((open) => !open)}>
+              Files
+            </button>
+            <button
+              className="btn"
+              onClick={() => setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'))}
+            >
+              {leftMode === 'edit' ? 'Preview' : 'Edit'}
+            </button>
+          </div>
+        </div>
+        <div className="topbarAside">
+          <div className="toolbarGroup">
+            <button className="btn" onClick={() => toggleTheme()}>
+              Theme
+            </button>
+            <button
+              className={`btn ${updateStatus === 'ready' ? 'danger' : ''}`}
+              onClick={handleUpdateAction}
+              disabled={updateStatus === 'checking'}
+            >
+              {updateButtonLabel}
+            </button>
+          </div>
           <button
-            className={`btn ${notesWindowOpen ? 'danger' : ''}`}
+            className={`btn ${notesWindowOpen ? 'active' : ''}`}
             onClick={() => {
               setNotesWindowOpen((open) => {
                 const next = !open;
@@ -630,7 +703,7 @@ export function EditView() {
               });
             }}
           >
-            {notesWindowOpen ? 'Close Notes Window' : 'Open Notes Window (F5)'}
+            Notes
           </button>
         </div>
       </div>
@@ -649,18 +722,17 @@ export function EditView() {
                 <div className="workspaceSidebarActions">
                   {workspaceDirPath ? (
                     <button
-                      className="sidebarBtn"
+                      className="sidebarBtn iconBtn"
                       onClick={() => {
                         if (!workspaceDirPath) return;
                         void refreshWorkspace(workspaceDirPath);
                       }}
+                      title="Refresh files"
+                      aria-label="Refresh files"
                     >
-                      Refresh
+                      ↻
                     </button>
                   ) : null}
-                  <button className="sidebarBtn" onClick={() => setSidebarOpen(false)}>
-                    Hide
-                  </button>
                 </div>
               </div>
               <div className="cardBody fullHeight workspaceSidebarBody">
@@ -669,29 +741,45 @@ export function EditView() {
                 {workspaceStatus === 'idle' ? (
                   <div className="workspaceEmpty">Open a folder to browse files in the current directory.</div>
                 ) : null}
-                {workspaceStatus === 'ready' && workspaceEntries.length === 0 ? (
-                  <div className="workspaceEmpty">This folder does not contain any files.</div>
+                {workspaceStatus === 'ready' && visibleWorkspaceEntries.length === 0 ? (
+                  <div className="workspaceEmpty">This folder does not contain any markdown files.</div>
                 ) : null}
-                {workspaceStatus === 'ready' && workspaceEntries.length > 0 ? (
+                {workspaceStatus === 'ready' && visibleWorkspaceEntries.length > 0 ? (
                   <>
                     <div className="workspaceSummary">
-                      {workspaceEntries.length} files, {workspaceMarkdownCount} markdown
+                      {workspaceMarkdownCount} markdown in {workspaceFolderCount} folders
                     </div>
                     <div className="workspaceList">
-                      {workspaceEntries.map((entry) => {
-                        const isCurrent = entry.path === docPath;
+                      {visibleWorkspaceEntries.map((entry) => {
+                        const isDirectory = entry.kind === 'directory';
+                        const isCurrent = !isDirectory && entry.path === docPath;
+                        const isCollapsed = isDirectory && collapsedDirPaths.has(entry.path);
                         return (
                           <button
                             key={entry.path}
-                            className={`workspaceItem ${isCurrent ? 'active' : ''}`}
-                            disabled={!entry.isMarkdown}
+                            className={`workspaceItem ${isCurrent ? 'active' : ''} ${isDirectory ? 'directory' : 'file'}`}
                             onClick={() => {
+                              if (isDirectory) {
+                                setCollapsedDirPaths((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(entry.path)) next.delete(entry.path);
+                                  else next.add(entry.path);
+                                  return next;
+                                });
+                                return;
+                              }
                               void handleOpenWorkspaceEntry(entry);
                             }}
                             title={entry.path}
+                            style={{ '--tree-depth': String(entry.depth) } as React.CSSProperties}
                           >
-                            <span className="workspaceItemName">{entry.name}</span>
-                            <span className="workspaceItemMeta">{entry.isMarkdown ? 'Markdown' : 'Read only'}</span>
+                            <span className={`workspaceItemChevron ${isCollapsed ? 'collapsed' : ''}`}>
+                              {isDirectory ? (isCollapsed ? '▸' : '▾') : '·'}
+                            </span>
+                            <span className="workspaceItemLabel">
+                              {isDirectory ? <span className="workspaceFolderIcon" aria-hidden="true" /> : null}
+                              <span className="workspaceItemName">{entry.name}</span>
+                            </span>
                           </button>
                         );
                       })}
@@ -736,6 +824,20 @@ export function EditView() {
               </div>
             )}
           </div>
+        </div>
+      </div>
+
+      <div className="subbar bottomBar">
+        <div className="left">
+          <span className="pill">
+            {currentDocName}
+            {dirty ? <span className="dirtyMark"> •</span> : null}
+          </span>
+          {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
+        </div>
+        <div className="right">
+          <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
+          {updateStatus === 'downloading' ? <span className="pill">Downloading {Math.round(downloadProgress)}%</span> : null}
         </div>
       </div>
     </div>
