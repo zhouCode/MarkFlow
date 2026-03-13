@@ -28,6 +28,12 @@ jobs:
       - run: npm run build
       - run: npx electron-builder --publish never
 
+      - name: Normalize Windows updater asset names
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          node -e "const fs=require('fs'); const path=require('path'); const yaml=require('yaml'); const outDir='dist_electron'; const latestPath=path.join(outDir,'latest.yml'); const latest=yaml.parse(fs.readFileSync(latestPath,'utf8')); const expected=latest.path || latest.files?.[0]?.url; if (!expected) throw new Error('latest.yml is missing the Windows installer path'); const installers=fs.readdirSync(outDir).filter((name)=>name.endsWith('.exe') && !name.endsWith('.blockmap')); if (installers.length !== 1) throw new Error('Expected exactly one Windows installer, found: ' + installers.join(', ')); const actual=installers[0]; if (actual !== expected) { fs.renameSync(path.join(outDir, actual), path.join(outDir, expected)); const actualBlockmap=path.join(outDir, actual + '.blockmap'); const expectedBlockmap=path.join(outDir, expected + '.blockmap'); if (fs.existsSync(actualBlockmap) && actualBlockmap !== expectedBlockmap) fs.renameSync(actualBlockmap, expectedBlockmap); } if (!fs.existsSync(path.join(outDir, expected))) throw new Error('Expected installer not found after normalization: ' + expected); console.log('Windows updater installer:', expected);"
+
       - uses: actions/upload-artifact@v4
         with:
           name: markflow-${{ matrix.os }}
