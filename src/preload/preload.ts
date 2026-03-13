@@ -37,6 +37,7 @@ export type UpdateDownloadProgress = {
 };
 
 contextBridge.exposeInMainWorld('markflow', {
+  platform: process.platform,
   docOpen: () => ipcRenderer.invoke('doc:open'),
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
   docSetMarkdown: (args: { docPath: string | null; markdown: string }) => ipcRenderer.send('doc:setMarkdown', args),

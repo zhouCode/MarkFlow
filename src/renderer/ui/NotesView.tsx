@@ -12,6 +12,7 @@ const EMPTY_STATE: NotesWindowState = {
 
 export function NotesView() {
   useTheme();
+  const showCustomHeader = window.markflow.platform === 'darwin';
   const [state, setState] = React.useState<NotesWindowState>(EMPTY_STATE);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const syncingScrollRef = React.useRef(false);
@@ -53,9 +54,11 @@ export function NotesView() {
   return (
     <div className="notesWindowShell" style={contentZoomStyle}>
       <div className="notesWindowFrame">
-        <div className="notesWindowHeader">
-          <div className="notesWindowTitle">Notes</div>
-        </div>
+        {showCustomHeader ? (
+          <div className="notesWindowHeader">
+            <div className="notesWindowTitle">Notes</div>
+          </div>
+        ) : null}
         <div
           ref={scrollRef}
           className="notesWindowScroller"

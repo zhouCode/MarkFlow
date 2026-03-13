@@ -24,6 +24,7 @@ declare global {
 
   interface Window {
     markflow: {
+      platform: string;
       docOpen: () => Promise<{ docPath: string | null; markdown: string } | null>;
       docSave: (args: { docPath: string | null; markdown: string }) => Promise<{ docPath: string | null } | null>;
       docSetMarkdown: (args: { docPath: string | null; markdown: string }) => void;

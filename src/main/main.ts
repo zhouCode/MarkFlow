@@ -78,7 +78,7 @@ const EDIT_CONTENT_ZOOM_MAX = 2;
 const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
 const MARKFLOW_ASSET_PROTOCOL = 'markflow-asset';
 const WINDOW_DOCK_THRESHOLD = 28;
-const WINDOW_DOCK_GAP = 10;
+const WINDOW_DOCK_GAP = 4;
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
 
