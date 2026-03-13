@@ -51,6 +51,12 @@ type ContentZoomState = {
   scale: number;
 };
 
+type FileBrowserEntry = {
+  name: string;
+  path: string;
+  isMarkdown: boolean;
+};
+
 type PendingOpenState = {
   filePath: string | null;
 };
@@ -151,6 +157,21 @@ async function loadDocument(filePath: string) {
   currentMarkdown = markdown;
   await writePersistedState({ lastDocPath: filePath });
   return { docPath: currentDocPath, markdown: currentMarkdown };
+}
+
+async function listDirectoryFiles(dirPath: string): Promise<FileBrowserEntry[]> {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const filePath = path.join(dirPath, entry.name);
+      return {
+        name: entry.name,
+        path: filePath,
+        isMarkdown: looksLikeMarkdownPath(filePath)
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
 async function loadDocumentIntoWindows(filePath: string) {
@@ -658,6 +679,13 @@ app.whenReady().then(async () => {
     return loadDocumentIntoWindows(filePath);
   });
 
+  ipcMain.handle('doc:openPath', async (_evt, args: { filePath: string }) => {
+    if (!looksLikeMarkdownPath(args.filePath)) {
+      throw new Error('Only Markdown files can be opened in the editor.');
+    }
+    return loadDocumentIntoWindows(args.filePath);
+  });
+
   ipcMain.handle('doc:save', async (_evt, args: { docPath: string | null; markdown: string }) => {
     const { dialog } = await import('electron');
     if (!editWindow) return null;
@@ -675,6 +703,28 @@ app.whenReady().then(async () => {
     await writePersistedState({ lastDocPath: filePath });
     editWindow.webContents.send('doc:saved', { docPath: currentDocPath });
     return { docPath: currentDocPath };
+  });
+
+  ipcMain.handle('folder:open', async () => {
+    const { dialog } = await import('electron');
+    if (!editWindow) return null;
+    const res = await dialog.showOpenDialog(editWindow, {
+      properties: ['openDirectory']
+    });
+    if (res.canceled || res.filePaths.length === 0) return null;
+    return { dirPath: res.filePaths[0]! };
+  });
+
+  ipcMain.handle('folder:list', async (_evt, args: { dirPath: string }) => {
+    const dirPath = path.resolve(args.dirPath);
+    const stats = await fs.stat(dirPath);
+    if (!stats.isDirectory()) {
+      throw new Error('Selected path is not a directory.');
+    }
+    return {
+      dirPath,
+      entries: await listDirectoryFiles(dirPath)
+    };
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {

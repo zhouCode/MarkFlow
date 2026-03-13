@@ -4,6 +4,12 @@ export type ContentZoomState = {
   scale: number;
 };
 
+export type FileBrowserEntry = {
+  name: string;
+  path: string;
+  isMarkdown: boolean;
+};
+
 export type NotesWindowEntry = {
   id: string;
   line: number;
@@ -39,8 +45,11 @@ export type UpdateDownloadProgress = {
 contextBridge.exposeInMainWorld('markflow', {
   platform: process.platform,
   docOpen: () => ipcRenderer.invoke('doc:open'),
+  docOpenPath: (args: { filePath: string }) => ipcRenderer.invoke('doc:openPath', args),
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
   docSetMarkdown: (args: { docPath: string | null; markdown: string }) => ipcRenderer.send('doc:setMarkdown', args),
+  folderOpen: () => ipcRenderer.invoke('folder:open'),
+  folderList: (args: { dirPath: string }) => ipcRenderer.invoke('folder:list', args),
 
   contentZoomIn: () => ipcRenderer.send('contentZoom:adjust', 'in'),
   contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),

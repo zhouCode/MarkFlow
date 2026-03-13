@@ -22,12 +22,21 @@ declare global {
     zoomScale: number;
   };
 
+  type FileBrowserEntry = {
+    name: string;
+    path: string;
+    isMarkdown: boolean;
+  };
+
   interface Window {
     markflow: {
       platform: string;
       docOpen: () => Promise<{ docPath: string | null; markdown: string } | null>;
+      docOpenPath: (args: { filePath: string }) => Promise<{ docPath: string | null; markdown: string }>;
       docSave: (args: { docPath: string | null; markdown: string }) => Promise<{ docPath: string | null } | null>;
       docSetMarkdown: (args: { docPath: string | null; markdown: string }) => void;
+      folderOpen: () => Promise<{ dirPath: string } | null>;
+      folderList: (args: { dirPath: string }) => Promise<{ dirPath: string; entries: FileBrowserEntry[] }>;
 
       contentZoomIn: () => void;
       contentZoomOut: () => void;

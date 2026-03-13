@@ -8,11 +8,34 @@ import { useParsedDoc } from './useParsedDoc';
 import { renderInlineMarkdown } from '../markdown/parse';
 import { useTheme } from './theme';
 
+type WorkspaceStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+function getParentDirPath(filePath: string): string | null {
+  const normalized = filePath.replace(/[\\/]+$/, '');
+  const separatorIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+  if (separatorIndex < 0) return null;
+  if (separatorIndex === 0) return normalized.slice(0, 1);
+  if (separatorIndex === 2 && /^[A-Za-z]:/.test(normalized)) return normalized.slice(0, 3);
+  return normalized.slice(0, separatorIndex);
+}
+
+function getBaseName(filePath: string | null): string {
+  if (!filePath) return 'Untitled';
+  const normalized = filePath.replace(/[\\/]+$/, '');
+  const separatorIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+  return separatorIndex >= 0 ? normalized.slice(separatorIndex + 1) : normalized;
+}
+
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
   const [markdown, setMarkdown] = React.useState('');
   const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState('');
+  const [workspaceDirPath, setWorkspaceDirPath] = React.useState<string | null>(null);
+  const [workspaceEntries, setWorkspaceEntries] = React.useState<FileBrowserEntry[]>([]);
+  const [workspaceStatus, setWorkspaceStatus] = React.useState<WorkspaceStatus>('idle');
+  const [workspaceError, setWorkspaceError] = React.useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = React.useState(true);
   const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [notesWindowOpen, setNotesWindowOpen] = React.useState(false);
@@ -68,6 +91,29 @@ export function EditView() {
     return () => offProgress();
   }, []);
 
+  const refreshWorkspace = React.useCallback(async (dirPath: string) => {
+    setWorkspaceStatus('loading');
+    setWorkspaceError(null);
+    try {
+      const result = await window.markflow.folderList({ dirPath });
+      setWorkspaceDirPath(result.dirPath);
+      setWorkspaceEntries(result.entries);
+      setWorkspaceStatus('ready');
+    } catch (error) {
+      setWorkspaceDirPath(dirPath);
+      setWorkspaceEntries([]);
+      setWorkspaceStatus('error');
+      setWorkspaceError(error instanceof Error ? error.message : '读取文件夹失败');
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!docPath) return;
+    const dirPath = getParentDirPath(docPath);
+    if (!dirPath) return;
+    void refreshWorkspace(dirPath);
+  }, [docPath, refreshWorkspace]);
+
   const handleCheckUpdate = React.useCallback(async () => {
     setUpdateStatus('checking');
     const result = await window.markflow.updateCheck();
@@ -98,6 +144,58 @@ export function EditView() {
   const handleInstallUpdate = React.useCallback(() => {
     window.markflow.updateInstall();
   }, []);
+
+  const saveCurrentDocument = React.useCallback(async () => {
+    const result = await window.markflow.docSave({ docPath, markdown });
+    return Boolean(result?.docPath);
+  }, [docPath, markdown]);
+
+  const confirmSwitchIfDirty = React.useCallback(async () => {
+    const dirty = markdown !== lastSavedMarkdown;
+    if (!dirty) return true;
+
+    const shouldSave = window.confirm('当前文档有未保存修改。点击“确定”先保存，再切换文件。');
+    if (shouldSave) {
+      const saved = await saveCurrentDocument();
+      if (!saved) return false;
+      return true;
+    }
+
+    return window.confirm('确定放弃当前未保存修改并切换文件吗？');
+  }, [lastSavedMarkdown, markdown, saveCurrentDocument]);
+
+  const handleOpenFile = React.useCallback(async () => {
+    if (!(await confirmSwitchIfDirty())) return;
+    try {
+      await window.markflow.docOpen();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '打开文件失败');
+    }
+  }, [confirmSwitchIfDirty]);
+
+  const handleOpenFolder = React.useCallback(async () => {
+    try {
+      const result = await window.markflow.folderOpen();
+      if (!result) return;
+      setSidebarOpen(true);
+      await refreshWorkspace(result.dirPath);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '打开文件夹失败');
+    }
+  }, [refreshWorkspace]);
+
+  const handleOpenWorkspaceEntry = React.useCallback(
+    async (entry: FileBrowserEntry) => {
+      if (!entry.isMarkdown) return;
+      if (!(await confirmSwitchIfDirty())) return;
+      try {
+        await window.markflow.docOpenPath({ filePath: entry.path });
+      } catch (error) {
+        alert(error instanceof Error ? error.message : '打开文件失败');
+      }
+    },
+    [confirmSwitchIfDirty]
+  );
 
   React.useEffect(() => {
     let cancelled = false;
@@ -372,6 +470,12 @@ export function EditView() {
   }, [docPath, markdown, notesWindowOpen]);
 
   const dirty = markdown !== lastSavedMarkdown;
+  const workspaceMarkdownCount = React.useMemo(
+    () => workspaceEntries.filter((entry) => entry.isMarkdown).length,
+    [workspaceEntries]
+  );
+  const currentDocName = React.useMemo(() => getBaseName(docPath), [docPath]);
+  const currentWorkspaceName = React.useMemo(() => getBaseName(workspaceDirPath), [workspaceDirPath]);
   const contentZoomStyle = React.useMemo(
     () => ({ '--content-zoom': String(contentZoomScale) } as React.CSSProperties),
     [contentZoomScale]
@@ -461,11 +565,19 @@ export function EditView() {
         <div className="left">
           <button
             className="btn"
-            onClick={async () => {
-              await window.markflow.docOpen();
+            onClick={() => {
+              void handleOpenFile();
             }}
           >
             Open
+          </button>
+          <button
+            className="btn"
+            onClick={() => {
+              void handleOpenFolder();
+            }}
+          >
+            Open Folder
           </button>
           <button
             className="btn"
@@ -475,7 +587,12 @@ export function EditView() {
           >
             Save
           </button>
+          <button className={`btn ${sidebarOpen ? '' : 'danger'}`} onClick={() => setSidebarOpen((open) => !open)}>
+            {sidebarOpen ? 'Hide Files' : 'Show Files'}
+          </button>
           {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
+          <span className="pill">{currentDocName}</span>
+          {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
           <span className="pill">Notes companion</span>
           <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
         </div>
@@ -519,40 +636,106 @@ export function EditView() {
       </div>
 
       <div className="appMain editorWorkspace" style={contentZoomStyle}>
-        <div className="card zoomCard">
-          {leftMode === 'preview' ? (
-            <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden zoomScroller">
-              <div ref={previewRef} className="markdown zoomContent" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
-            </div>
-          ) : (
-            <div className="cardBody fullHeight editorPane zoomEditorPane">
-              <CodeMirror
-                value={markdown}
-                theme={theme === 'dark' ? oneDark : cmLightTheme}
-                extensions={[mdLang()]}
-                onCreateEditor={(view: EditorView, _state: EditorState) => {
-                  editorViewRef.current = view;
-                  view.dom.style.height = '100%';
-                  view.dom.style.display = 'flex';
-                  view.dom.style.flexDirection = 'column';
-                  view.scrollDOM.style.flex = '1';
-                  view.scrollDOM.style.minHeight = '0';
-                  view.scrollDOM.style.height = '100%';
-                  view.scrollDOM.style.overflow = 'auto';
-                  view.contentDOM.style.minHeight = '100%';
-                }}
-                onChange={(value) => {
-                  setMarkdown(value);
-                  window.markflow.docSetMarkdown({ docPath, markdown: value });
-                }}
-                basicSetup={{
-                  lineNumbers: true,
-                  highlightActiveLine: true,
-                  foldGutter: true
-                }}
-              />
-            </div>
-          )}
+        <div className={`workspaceSplit ${sidebarOpen ? 'withSidebar' : 'withoutSidebar'}`}>
+          {sidebarOpen ? (
+            <aside className="card workspaceSidebar">
+              <div className="cardHeader workspaceSidebarHeader">
+                <div className="workspaceSidebarTitle">
+                  <span>Files</span>
+                  <span className="workspaceSidebarPath" title={workspaceDirPath ?? 'No folder selected'}>
+                    {workspaceDirPath ?? 'No folder selected'}
+                  </span>
+                </div>
+                <div className="workspaceSidebarActions">
+                  {workspaceDirPath ? (
+                    <button
+                      className="sidebarBtn"
+                      onClick={() => {
+                        if (!workspaceDirPath) return;
+                        void refreshWorkspace(workspaceDirPath);
+                      }}
+                    >
+                      Refresh
+                    </button>
+                  ) : null}
+                  <button className="sidebarBtn" onClick={() => setSidebarOpen(false)}>
+                    Hide
+                  </button>
+                </div>
+              </div>
+              <div className="cardBody fullHeight workspaceSidebarBody">
+                {workspaceStatus === 'loading' ? <div className="workspaceEmpty">Loading files...</div> : null}
+                {workspaceStatus === 'error' ? <div className="workspaceEmpty">{workspaceError ?? '读取文件夹失败'}</div> : null}
+                {workspaceStatus === 'idle' ? (
+                  <div className="workspaceEmpty">Open a folder to browse files in the current directory.</div>
+                ) : null}
+                {workspaceStatus === 'ready' && workspaceEntries.length === 0 ? (
+                  <div className="workspaceEmpty">This folder does not contain any files.</div>
+                ) : null}
+                {workspaceStatus === 'ready' && workspaceEntries.length > 0 ? (
+                  <>
+                    <div className="workspaceSummary">
+                      {workspaceEntries.length} files, {workspaceMarkdownCount} markdown
+                    </div>
+                    <div className="workspaceList">
+                      {workspaceEntries.map((entry) => {
+                        const isCurrent = entry.path === docPath;
+                        return (
+                          <button
+                            key={entry.path}
+                            className={`workspaceItem ${isCurrent ? 'active' : ''}`}
+                            disabled={!entry.isMarkdown}
+                            onClick={() => {
+                              void handleOpenWorkspaceEntry(entry);
+                            }}
+                            title={entry.path}
+                          >
+                            <span className="workspaceItemName">{entry.name}</span>
+                            <span className="workspaceItemMeta">{entry.isMarkdown ? 'Markdown' : 'Read only'}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </aside>
+          ) : null}
+          <div className="card zoomCard">
+            {leftMode === 'preview' ? (
+              <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden zoomScroller">
+                <div ref={previewRef} className="markdown zoomContent" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
+              </div>
+            ) : (
+              <div className="cardBody fullHeight editorPane zoomEditorPane">
+                <CodeMirror
+                  value={markdown}
+                  theme={theme === 'dark' ? oneDark : cmLightTheme}
+                  extensions={[mdLang()]}
+                  onCreateEditor={(view: EditorView, _state: EditorState) => {
+                    editorViewRef.current = view;
+                    view.dom.style.height = '100%';
+                    view.dom.style.display = 'flex';
+                    view.dom.style.flexDirection = 'column';
+                    view.scrollDOM.style.flex = '1';
+                    view.scrollDOM.style.minHeight = '0';
+                    view.scrollDOM.style.height = '100%';
+                    view.scrollDOM.style.overflow = 'auto';
+                    view.contentDOM.style.minHeight = '100%';
+                  }}
+                  onChange={(value) => {
+                    setMarkdown(value);
+                    window.markflow.docSetMarkdown({ docPath, markdown: value });
+                  }}
+                  basicSetup={{
+                    lineNumbers: true,
+                    highlightActiveLine: true,
+                    foldGutter: true
+                  }}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
