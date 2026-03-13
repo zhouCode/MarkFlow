@@ -11,35 +11,22 @@ import { useTheme } from './theme';
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
-  const [markdown, setMarkdown] = React.useState<string>('');
-  const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState<string>('');
+  const [markdown, setMarkdown] = React.useState('');
+  const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState('');
   const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
-  const [shareWindowOpen, setShareWindowOpen] = React.useState(false);
+  const [notesWindowOpen, setNotesWindowOpen] = React.useState(false);
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});
   const [contentZoomScale, setContentZoomScale] = React.useState(1);
   const [updateStatus, setUpdateStatus] = React.useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready'>('idle');
   const [updateVersion, setUpdateVersion] = React.useState<string | null>(null);
-  const [downloadProgress, setDownloadProgress] = React.useState<number>(0);
-  const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
-  const previewRef = React.useRef<HTMLDivElement | null>(null);
-  const notesScrollRef = React.useRef<HTMLDivElement | null>(null);
-  const notesPaneRef = React.useRef<HTMLDivElement | null>(null);
-  const syncShareScroll = React.useCallback((scroller: HTMLElement | null) => {
-    if (!scroller) return;
-    const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
-    const progress = scroller.scrollTop / max;
-    window.markflow.shareScrollTo({ progress });
-  }, []);
-  const currentShareScroller = React.useCallback(() => {
-    return leftMode === 'preview'
-      ? previewScrollRef.current
-      : (editorViewRef.current?.scrollDOM ?? null);
-  }, [leftMode]);
+  const [downloadProgress, setDownloadProgress] = React.useState(0);
   const [activeAnchor, setActiveAnchor] = React.useState<string | null>(null);
   const [anchorTopById, setAnchorTopById] = React.useState<Record<string, number>>({});
-  const [previewScrollHeight, setPreviewScrollHeight] = React.useState<number>(0);
-  const syncingScrollRef = React.useRef<boolean>(false);
+  const [contentScrollHeight, setContentScrollHeight] = React.useState(1);
+  const [currentScrollTop, setCurrentScrollTop] = React.useState(0);
+  const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const previewRef = React.useRef<HTMLDivElement | null>(null);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
 
@@ -48,35 +35,35 @@ export function EditView() {
   }, [markdown]);
 
   React.useEffect(() => {
-    const off1 = window.markflow.onDocUpdate((p) => {
-      setDocPath(p.docPath);
-      setMarkdown(p.markdown);
-      setLastSavedMarkdown(p.markdown);
+    const offDocUpdate = window.markflow.onDocUpdate((payload) => {
+      setDocPath(payload.docPath);
+      setMarkdown(payload.markdown);
+      setLastSavedMarkdown(payload.markdown);
     });
-    const off2 = window.markflow.onDocSaved((p) => {
-      setDocPath(p.docPath);
+    const offDocSaved = window.markflow.onDocSaved((payload) => {
+      setDocPath(payload.docPath);
       setLastSavedMarkdown(markdownRef.current);
     });
-    const off3 = window.markflow.onContentZoomUpdate((p) => {
-      setContentZoomScale(p.scale);
+    const offZoom = window.markflow.onContentZoomUpdate((payload) => {
+      setContentZoomScale(payload.scale);
     });
     return () => {
-      off1();
-      off2();
-      off3();
+      offDocUpdate();
+      offDocSaved();
+      offZoom();
     };
   }, []);
 
   React.useEffect(() => {
-    const offShareClosed = window.markflow.onShareClosed(() => {
-      setShareWindowOpen(false);
+    const offClosed = window.markflow.onNotesClosed(() => {
+      setNotesWindowOpen(false);
     });
-    return () => offShareClosed();
+    return () => offClosed();
   }, []);
 
   React.useEffect(() => {
-    const offProgress = window.markflow.onUpdateDownloadProgress((p) => {
-      setDownloadProgress(p.percent);
+    const offProgress = window.markflow.onUpdateDownloadProgress((payload) => {
+      setDownloadProgress(payload.percent);
     });
     return () => offProgress();
   }, []);
@@ -115,10 +102,13 @@ export function EditView() {
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!parsed) return;
+      if (!parsed) {
+        setNoteHtmlById({});
+        return;
+      }
       const next: Record<string, string> = {};
-      for (const n of parsed.notes) {
-        next[n.id] = await renderInlineMarkdown(n.markdown);
+      for (const note of parsed.notes) {
+        next[note.id] = await renderInlineMarkdown(note.markdown);
       }
       if (!cancelled) setNoteHtmlById(next);
     })();
@@ -134,58 +124,201 @@ export function EditView() {
     if (!scroller || !content) return;
     const anchors = Array.from(content.querySelectorAll<HTMLElement>('[data-anchor]'));
     if (anchors.length === 0) return;
-    const obs = new IntersectionObserver(
+    const observer = new IntersectionObserver(
       (entries) => {
         const visible = entries
-          .filter((e) => e.isIntersecting)
+          .filter((entry) => entry.isIntersecting)
           .sort((a, b) => (a.boundingClientRect.top ?? 0) - (b.boundingClientRect.top ?? 0));
         const top = visible[0]?.target as HTMLElement | undefined;
-        if (top) setActiveAnchor(top.dataset.anchor ?? null);
+        if (top) {
+          setActiveAnchor(top.dataset.anchor ?? null);
+        }
       },
       { root: scroller, threshold: 0.2 }
     );
-    for (const a of anchors) obs.observe(a);
-    return () => obs.disconnect();
+    for (const anchor of anchors) observer.observe(anchor);
+    return () => observer.disconnect();
   }, [parsed, leftMode, contentZoomScale]);
 
   React.useEffect(() => {
-    if (!parsed) return;
-    if (leftMode !== 'preview') return;
+    if (!parsed || leftMode !== 'preview') return;
     const scroller = previewScrollRef.current;
     const content = previewRef.current;
     if (!scroller || !content) return;
 
     let raf = 0;
     const measure = () => {
-      const s = previewScrollRef.current;
-      const c = previewRef.current;
-      if (!s || !c) return;
-      const map: Record<string, number> = {};
-      const sRect = s.getBoundingClientRect();
-      const nodes = Array.from(c.querySelectorAll<HTMLElement>('[data-anchor]'));
-      for (const n of nodes) {
-        const id = n.dataset.anchor;
-        if (!id) continue;
-        const r = n.getBoundingClientRect();
-        map[id] = (r.top - sRect.top) + s.scrollTop;
+      const nextScroller = previewScrollRef.current;
+      const nextContent = previewRef.current;
+      if (!nextScroller || !nextContent) return;
+      const nextTopById: Record<string, number> = {};
+      const scrollerRect = nextScroller.getBoundingClientRect();
+      const anchors = Array.from(nextContent.querySelectorAll<HTMLElement>('[data-anchor]'));
+      for (const anchor of anchors) {
+        const anchorId = anchor.dataset.anchor;
+        if (!anchorId) continue;
+        const rect = anchor.getBoundingClientRect();
+        nextTopById[anchorId] = rect.top - scrollerRect.top + nextScroller.scrollTop;
       }
-      setAnchorTopById(map);
-      setPreviewScrollHeight(s.scrollHeight);
+      setAnchorTopById(nextTopById);
     };
 
-    const ro = new ResizeObserver(() => {
+    const resizeObserver = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(measure);
     });
-    ro.observe(scroller);
-    ro.observe(content);
+    resizeObserver.observe(scroller);
+    resizeObserver.observe(content);
     raf = requestAnimationFrame(measure);
 
     return () => {
       cancelAnimationFrame(raf);
-      ro.disconnect();
+      resizeObserver.disconnect();
     };
   }, [parsed, leftMode, contentZoomScale]);
+
+  React.useEffect(() => {
+    if (leftMode === 'preview') {
+      const scroller = previewScrollRef.current;
+      const content = previewRef.current;
+      if (!scroller || !content) return;
+
+      let raf = 0;
+      const syncMetrics = () => {
+        setCurrentScrollTop(scroller.scrollTop);
+        setContentScrollHeight(scroller.scrollHeight);
+      };
+      const onScroll = () => syncMetrics();
+      const resizeObserver = new ResizeObserver(() => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(syncMetrics);
+      });
+
+      scroller.addEventListener('scroll', onScroll, { passive: true });
+      resizeObserver.observe(scroller);
+      resizeObserver.observe(content);
+      syncMetrics();
+
+      return () => {
+        scroller.removeEventListener('scroll', onScroll);
+        cancelAnimationFrame(raf);
+        resizeObserver.disconnect();
+      };
+    }
+
+    const view = editorViewRef.current;
+    if (!view) return;
+    const scroller = view.scrollDOM;
+    const content = view.contentDOM;
+
+    let raf = 0;
+    const syncMetrics = () => {
+      setCurrentScrollTop(scroller.scrollTop);
+      setContentScrollHeight(scroller.scrollHeight);
+    };
+    const onScroll = () => syncMetrics();
+    const resizeObserver = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(syncMetrics);
+    });
+
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    resizeObserver.observe(scroller);
+    resizeObserver.observe(content);
+    syncMetrics();
+
+    return () => {
+      scroller.removeEventListener('scroll', onScroll);
+      cancelAnimationFrame(raf);
+      resizeObserver.disconnect();
+    };
+  }, [leftMode, parsed, markdown, contentZoomScale]);
+
+  React.useEffect(() => {
+    if (leftMode !== 'edit') return;
+    const view = editorViewRef.current;
+    if (!view || !parsed) return;
+
+    const anchorLineById = new Map<string, number>();
+    for (const anchor of parsed.anchors) anchorLineById.set(anchor.anchorId, anchor.sourceRange.startLine);
+
+    const anchors = parsed.anchors
+      .map((anchor) => {
+        const line = anchorLineById.get(anchor.anchorId) ?? 1;
+        const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
+        const pos = view.state.doc.line(safeLine).from;
+        const top = view.lineBlockAt(pos).top;
+        return { id: anchor.anchorId, top };
+      })
+      .sort((a, b) => a.top - b.top);
+
+    const onScroll = () => {
+      const scrollTop = view.scrollDOM.scrollTop + 8;
+      let current = anchors[0]?.id ?? null;
+      for (const anchor of anchors) {
+        if (anchor.top <= scrollTop) current = anchor.id;
+        else break;
+      }
+      setActiveAnchor(current);
+    };
+
+    view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => view.scrollDOM.removeEventListener('scroll', onScroll);
+  }, [leftMode, parsed, markdown, contentZoomScale]);
+
+  const currentScroller = React.useCallback(() => {
+    if (leftMode === 'preview') return previewScrollRef.current;
+    return editorViewRef.current?.scrollDOM ?? null;
+  }, [leftMode]);
+
+  const scrollToProgress = React.useCallback(
+    (progress: number) => {
+      const scroller = currentScroller();
+      if (!scroller) return;
+      const max = Math.max(1, scroller.scrollHeight - scroller.clientHeight);
+      scroller.scrollTop = Math.max(0, Math.min(1, progress)) * max;
+    },
+    [currentScroller]
+  );
+
+  const scrollToAnchor = React.useCallback(
+    (anchorId: string) => {
+      if (!parsed) return;
+      if (leftMode === 'preview') {
+        const root = previewRef.current;
+        const scroller = previewScrollRef.current;
+        if (!root || !scroller) return;
+        const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchorId)}"]`);
+        if (!target) return;
+        scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
+        return;
+      }
+
+      const view = editorViewRef.current;
+      if (!view) return;
+      const anchor = parsed.anchors.find((item) => item.anchorId === anchorId);
+      const line = anchor?.sourceRange.startLine ?? 1;
+      const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
+      const pos = view.state.doc.line(safeLine).from;
+      const block = view.lineBlockAt(pos);
+      view.scrollDOM.scrollTo({ top: block.top, behavior: 'smooth' });
+    },
+    [leftMode, parsed]
+  );
+
+  React.useEffect(() => {
+    const offNavigate = window.markflow.onNotesNavigateTo((payload) => {
+      scrollToAnchor(payload.anchorId);
+    });
+    const offScroll = window.markflow.onNotesScrollTo((payload) => {
+      scrollToProgress(payload.progress);
+    });
+    return () => {
+      offNavigate();
+      offScroll();
+    };
+  }, [scrollToAnchor, scrollToProgress]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -210,12 +343,11 @@ export function EditView() {
       }
       if (e.key === 'F5') {
         e.preventDefault();
-        setLeftMode('preview');
-        setShareWindowOpen(true);
-        window.markflow.shareOpen({
-          docPath,
-          markdown,
-          displayTarget: 'auto'
+        setNotesWindowOpen((open) => {
+          const next = !open;
+          if (next) window.markflow.notesOpen();
+          else window.markflow.notesClose();
+          return next;
         });
         return;
       }
@@ -226,51 +358,25 @@ export function EditView() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
-        setLeftMode((m) => (m === 'edit' ? 'preview' : 'edit'));
+        setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'));
         return;
       }
-      if (e.key === 'Escape' && shareWindowOpen) {
+      if (e.key === 'Escape' && notesWindowOpen) {
         e.preventDefault();
-        setShareWindowOpen(false);
-        window.markflow.shareClose();
+        setNotesWindowOpen(false);
+        window.markflow.notesClose();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [docPath, markdown, shareWindowOpen, syncShareScroll]);
-
-  React.useEffect(() => {
-    if (!shareWindowOpen) return;
-    const scroller = currentShareScroller();
-    if (!scroller) return;
-
-    const onScroll = () => syncShareScroll(scroller);
-    const ro = new ResizeObserver(() => {
-      syncShareScroll(scroller);
-    });
-    const editContent = editorViewRef.current?.contentDOM ?? null;
-
-    scroller.addEventListener('scroll', onScroll, { passive: true });
-    ro.observe(scroller);
-    if (leftMode === 'preview' && previewRef.current) {
-      ro.observe(previewRef.current);
-    }
-    if (leftMode === 'edit' && editContent) {
-      ro.observe(editContent);
-    }
-    syncShareScroll(scroller);
-
-    return () => {
-      scroller.removeEventListener('scroll', onScroll);
-      ro.disconnect();
-    };
-  }, [shareWindowOpen, leftMode, parsed, markdown, contentZoomScale, currentShareScroller, syncShareScroll]);
+  }, [docPath, markdown, notesWindowOpen]);
 
   const dirty = markdown !== lastSavedMarkdown;
   const contentZoomStyle = React.useMemo(
     () => ({ '--content-zoom': String(contentZoomScale) } as React.CSSProperties),
     [contentZoomScale]
   );
+
   const cmLightTheme = React.useMemo(
     () =>
       EditorView.theme(
@@ -287,13 +393,13 @@ export function EditView() {
   const notesWithTop = React.useMemo(() => {
     const list = parsed?.notes ?? [];
     const groups = new Map<string, { top: number; notes: typeof list }>();
-    for (const n of list) {
-      const top = anchorTopById[n.anchorId] ?? 0;
-      const existing = groups.get(n.anchorId);
+    for (const note of list) {
+      const top = anchorTopById[note.anchorId] ?? 0;
+      const existing = groups.get(note.anchorId);
       if (existing) {
-        existing.notes.push(n);
+        existing.notes.push(note);
       } else {
-        groups.set(n.anchorId, { top, notes: [n] });
+        groups.set(note.anchorId, { top, notes: [note] });
       }
     }
     return Array.from(groups.entries())
@@ -305,93 +411,49 @@ export function EditView() {
     const view = editorViewRef.current;
     if (!view || !parsed) return [];
     const anchorLineById = new Map<string, number>();
-    for (const a of parsed.anchors) anchorLineById.set(a.anchorId, a.sourceRange.startLine);
+    for (const anchor of parsed.anchors) anchorLineById.set(anchor.anchorId, anchor.sourceRange.startLine);
 
-    const groups = new Map<string, { top: number; notes: (typeof parsed.notes) }>();
-    for (const n of parsed.notes) {
-      const line = anchorLineById.get(n.anchorId) ?? n.sourceRange.startLine;
+    const groups = new Map<string, { top: number; notes: typeof parsed.notes }>();
+    for (const note of parsed.notes) {
+      const line = anchorLineById.get(note.anchorId) ?? note.sourceRange.startLine;
       const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
       const pos = view.state.doc.line(safeLine).from;
       const top = view.lineBlockAt(pos).top;
-      const existing = groups.get(n.anchorId);
+      const existing = groups.get(note.anchorId);
       if (existing) {
-        existing.notes.push(n);
+        existing.notes.push(note);
       } else {
-        groups.set(n.anchorId, { top, notes: [n] });
+        groups.set(note.anchorId, { top, notes: [note] });
       }
     }
     return Array.from(groups.entries())
       .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
       .sort((a, b) => a.top - b.top);
-  }, [parsed, markdown, leftMode, contentZoomScale]);
+  }, [parsed, markdown, contentZoomScale]);
 
-
-  React.useEffect(() => {
-    if (!notesScrollRef.current) return;
-
-    if (leftMode === 'preview') {
-      const left = previewScrollRef.current;
-      if (!left) return;
-      setPreviewScrollHeight(left.scrollHeight);
-      const onScroll = () => {
-        if (!notesScrollRef.current) return;
-        if (syncingScrollRef.current) return;
-        syncingScrollRef.current = true;
-        notesScrollRef.current.scrollTop = left.scrollTop;
-        requestAnimationFrame(() => {
-          syncingScrollRef.current = false;
-        });
-      };
-      left.addEventListener('scroll', onScroll, { passive: true });
-      onScroll();
-      return () => left.removeEventListener('scroll', onScroll);
-    }
-
-    const view = editorViewRef.current;
-    if (!view) return;
-    const left = view.scrollDOM;
-    setPreviewScrollHeight(left.scrollHeight);
-    const onScroll = () => {
-      if (!notesScrollRef.current) return;
-      notesScrollRef.current.scrollTop = left.scrollTop;
-    };
-    left.addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
-    return () => left.removeEventListener('scroll', onScroll);
-  }, [leftMode, parsed, contentZoomScale]);
+  const notesGroups = React.useMemo<NotesWindowGroup[]>(() => {
+    const source = leftMode === 'preview' ? notesWithTop : notesWithTopForEditor;
+    return source.map((group) => ({
+      anchorId: group.anchorId,
+      top: group.top,
+      notes: group.notes.map((note) => ({
+        id: note.id,
+        line: note.sourceRange.startLine,
+        html: noteHtmlById[note.id] ?? ''
+      }))
+    }));
+  }, [leftMode, noteHtmlById, notesWithTop, notesWithTopForEditor]);
 
   React.useEffect(() => {
-    if (leftMode !== 'edit') return;
-    const view = editorViewRef.current;
-    if (!view || !parsed) return;
-
-    const anchorLineById = new Map<string, number>();
-    for (const a of parsed.anchors) anchorLineById.set(a.anchorId, a.sourceRange.startLine);
-
-    const anchors = parsed.anchors
-      .map((a) => {
-        const line = anchorLineById.get(a.anchorId) ?? 1;
-        const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
-        const pos = view.state.doc.line(safeLine).from;
-        const top = view.lineBlockAt(pos).top;
-        return { id: a.anchorId, top };
-      })
-      .sort((x, y) => x.top - y.top);
-
-    const onScroll = () => {
-      const sTop = view.scrollDOM.scrollTop + 8;
-      let cur = anchors[0]?.id ?? null;
-      for (const a of anchors) {
-        if (a.top <= sTop) cur = a.id;
-        else break;
-      }
-      setActiveAnchor(cur);
-    };
-
-    view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
-    return () => view.scrollDOM.removeEventListener('scroll', onScroll);
-  }, [leftMode, parsed, markdown, contentZoomScale]);
+    window.markflow.notesUpdate({
+      mode: leftMode,
+      activeAnchor,
+      groups: notesGroups,
+      scrollHeight: Math.max(contentScrollHeight, 1),
+      scrollTop: currentScrollTop,
+      zoomScale: contentZoomScale
+    });
+  }, [leftMode, activeAnchor, notesGroups, contentScrollHeight, currentScrollTop, contentZoomScale]);
 
   return (
     <div className="appShell">
@@ -414,7 +476,7 @@ export function EditView() {
             Save
           </button>
           {dirty ? <span className="pill" style={{ borderColor: 'rgba(251,113,133,0.35)' }}>unsaved</span> : null}
-          <span className="pill">Private workspace</span>
+          <span className="pill">Notes companion</span>
           <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
         </div>
         <div className="right">
@@ -437,38 +499,26 @@ export function EditView() {
               重启安装
             </button>
           )}
-          <button className="btn" onClick={() => setLeftMode((m) => (m === 'edit' ? 'preview' : 'edit'))}>
+          <button className="btn" onClick={() => setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'))}>
             Left: {leftMode === 'edit' ? 'Edit' : 'Preview'} (Ctrl/Cmd+E)
           </button>
           <button
-            className="btn"
+            className={`btn ${notesWindowOpen ? 'danger' : ''}`}
             onClick={() => {
-              setLeftMode('preview');
-              setShareWindowOpen(true);
-              window.markflow.shareOpen({
-                docPath,
-                markdown,
-                displayTarget: 'auto'
+              setNotesWindowOpen((open) => {
+                const next = !open;
+                if (next) window.markflow.notesOpen();
+                else window.markflow.notesClose();
+                return next;
               });
             }}
           >
-            Open Share Window (F5)
+            {notesWindowOpen ? 'Close Notes Window' : 'Open Notes Window (F5)'}
           </button>
-          {shareWindowOpen ? (
-            <button
-              className="btn danger"
-              onClick={() => {
-                setShareWindowOpen(false);
-                window.markflow.shareClose();
-              }}
-            >
-              Close Share Window
-            </button>
-          ) : null}
         </div>
       </div>
 
-      <div className="split appMain editorSplit" style={contentZoomStyle}>
+      <div className="appMain editorWorkspace" style={contentZoomStyle}>
         <div className="card zoomCard">
           {leftMode === 'preview' ? (
             <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden zoomScroller">
@@ -491,9 +541,9 @@ export function EditView() {
                   view.scrollDOM.style.overflow = 'auto';
                   view.contentDOM.style.minHeight = '100%';
                 }}
-                onChange={(v) => {
-                  setMarkdown(v);
-                  window.markflow.docSetMarkdown({ docPath, markdown: v });
+                onChange={(value) => {
+                  setMarkdown(value);
+                  window.markflow.docSetMarkdown({ docPath, markdown: value });
                 }}
                 basicSetup={{
                   lineNumbers: true,
@@ -503,89 +553,6 @@ export function EditView() {
               />
             </div>
           )}
-        </div>
-
-        <div className="card zoomCard">
-          <div
-            ref={notesScrollRef}
-            className="cardBody fullHeight zoomScroller"
-            onWheel={(e) => {
-              if (leftMode === 'edit') return;
-              const scroller =
-                leftMode === 'preview'
-                  ? previewScrollRef.current
-                  : (editorViewRef.current?.scrollDOM ?? null);
-              if (!scroller) return;
-              e.preventDefault();
-              scroller.scrollTop += e.deltaY;
-              syncShareScroll(scroller);
-            }}
-            onScroll={(e) => {
-              if (leftMode === 'edit') return;
-              const scroller =
-                leftMode === 'preview'
-                  ? previewScrollRef.current
-                  : (editorViewRef.current?.scrollDOM ?? null);
-              if (!scroller) return;
-              if (syncingScrollRef.current) return;
-              syncingScrollRef.current = true;
-              scroller.scrollTop = e.currentTarget.scrollTop;
-              syncShareScroll(scroller);
-              requestAnimationFrame(() => {
-                syncingScrollRef.current = false;
-              });
-            }}
-          >
-            <div
-              ref={notesPaneRef}
-              className="notesAlignContainer zoomContent"
-              style={{ height: Math.max(previewScrollHeight, 1) }}
-            >
-              {(leftMode === 'preview' ? notesWithTop : notesWithTopForEditor).map(({ anchorId, top, notes }) => (
-                <div
-                  key={anchorId}
-                  data-note-anchor={anchorId}
-                  className={`noteItem abs ${activeAnchor && anchorId === activeAnchor ? 'active' : ''}`}
-                  style={{ top, cursor: 'pointer' }}
-                  onClick={() => {
-                    const firstNote = notes[0];
-                    if (!firstNote) return;
-                    if (leftMode === 'preview') {
-                      const root = previewRef.current;
-                      const scroller = previewScrollRef.current;
-                      if (!root || !scroller) return;
-                      const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchorId)}"]`);
-                      if (!target) return;
-                      scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
-                      requestAnimationFrame(() => {
-                        syncShareScroll(scroller);
-                      });
-                      return;
-                    }
-                    const view = editorViewRef.current;
-                    if (!view || !parsed) return;
-                    const anchor = parsed.anchors.find((a) => a.anchorId === anchorId);
-                    const line = anchor?.sourceRange.startLine ?? firstNote.sourceRange.startLine;
-                    const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
-                    const pos = view.state.doc.line(safeLine).from;
-                    const block = view.lineBlockAt(pos);
-                    view.scrollDOM.scrollTop = block.top;
-                    syncShareScroll(view.scrollDOM);
-                  }}
-                >
-                  {notes.map((n) => (
-                    <div key={n.id} className="noteEntry">
-                      <div className="noteMeta">line {n.sourceRange.startLine}</div>
-                      <div dangerouslySetInnerHTML={{ __html: noteHtmlById[n.id] ?? '' }} />
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {(parsed?.notes ?? []).length === 0 ? (
-                <div className="noteItem">No notes found. Use <code>&lt;!-- note: ... --&gt;</code>.</div>
-              ) : null}
-            </div>
-          </div>
         </div>
       </div>
     </div>

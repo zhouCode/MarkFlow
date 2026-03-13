@@ -1,14 +1,28 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-export type ShareInit = {
-  docPath: string | null;
-  markdown: string;
-  progress: number;
-  zoomScale: number;
-};
-
 export type ContentZoomState = {
   scale: number;
+};
+
+export type NotesWindowEntry = {
+  id: string;
+  line: number;
+  html: string;
+};
+
+export type NotesWindowGroup = {
+  anchorId: string;
+  top: number;
+  notes: NotesWindowEntry[];
+};
+
+export type NotesWindowState = {
+  mode: 'preview' | 'edit';
+  activeAnchor: string | null;
+  groups: NotesWindowGroup[];
+  scrollHeight: number;
+  scrollTop: number;
+  zoomScale: number;
 };
 
 export type UpdateCheckResult =
@@ -31,13 +45,11 @@ contextBridge.exposeInMainWorld('markflow', {
   contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),
   contentZoomReset: () => ipcRenderer.send('contentZoom:adjust', 'reset'),
 
-  shareOpen: (payload: {
-    docPath: string | null;
-    markdown: string;
-    displayTarget?: 'auto' | 'external' | 'primary';
-  }) => ipcRenderer.send('share:open', payload),
-  shareClose: () => ipcRenderer.send('share:close'),
-  shareScrollTo: (payload: { progress: number }) => ipcRenderer.send('share:scrollTo', payload),
+  notesOpen: () => ipcRenderer.send('notes:open'),
+  notesClose: () => ipcRenderer.send('notes:close'),
+  notesUpdate: (payload: NotesWindowState) => ipcRenderer.send('notes:update', payload),
+  notesNavigateTo: (payload: { anchorId: string }) => ipcRenderer.send('notes:navigateTo', payload),
+  notesScrollTo: (payload: { progress: number }) => ipcRenderer.send('notes:scrollTo', payload),
 
   onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
     const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
@@ -55,20 +67,25 @@ contextBridge.exposeInMainWorld('markflow', {
     return () => ipcRenderer.removeListener('contentZoom:update', handler);
   },
 
-  onShareInit: (cb: (payload: ShareInit) => void) => {
-    const handler = (_: unknown, payload: ShareInit) => cb(payload);
-    ipcRenderer.on('share:init', handler);
-    return () => ipcRenderer.removeListener('share:init', handler);
+  onNotesUpdate: (cb: (payload: NotesWindowState) => void) => {
+    const handler = (_: unknown, payload: NotesWindowState) => cb(payload);
+    ipcRenderer.on('notes:update', handler);
+    return () => ipcRenderer.removeListener('notes:update', handler);
   },
-  onShareScrollTo: (cb: (payload: { progress: number }) => void) => {
-    const handler = (_: unknown, payload: { progress: number }) => cb(payload);
-    ipcRenderer.on('share:scrollTo', handler);
-    return () => ipcRenderer.removeListener('share:scrollTo', handler);
-  },
-  onShareClosed: (cb: () => void) => {
+  onNotesClosed: (cb: () => void) => {
     const handler = () => cb();
-    ipcRenderer.on('share:closed', handler);
-    return () => ipcRenderer.removeListener('share:closed', handler);
+    ipcRenderer.on('notes:closed', handler);
+    return () => ipcRenderer.removeListener('notes:closed', handler);
+  },
+  onNotesNavigateTo: (cb: (payload: { anchorId: string }) => void) => {
+    const handler = (_: unknown, payload: { anchorId: string }) => cb(payload);
+    ipcRenderer.on('notes:navigateTo', handler);
+    return () => ipcRenderer.removeListener('notes:navigateTo', handler);
+  },
+  onNotesScrollTo: (cb: (payload: { progress: number }) => void) => {
+    const handler = (_: unknown, payload: { progress: number }) => cb(payload);
+    ipcRenderer.on('notes:scrollTo', handler);
+    return () => ipcRenderer.removeListener('notes:scrollTo', handler);
   },
 
   updateCheck: () => ipcRenderer.invoke('update:check'),
