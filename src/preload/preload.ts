@@ -45,6 +45,12 @@ export type UpdateDownloadProgress = {
   total: number;
 };
 
+export type AppInfo = {
+  version: string;
+  author: string;
+  repositoryUrl: string;
+};
+
 contextBridge.exposeInMainWorld('markflow', {
   platform: process.platform,
   docOpen: () => ipcRenderer.invoke('doc:open'),
@@ -108,5 +114,8 @@ contextBridge.exposeInMainWorld('markflow', {
     const handler = (_: unknown, payload: UpdateDownloadProgress) => cb(payload);
     ipcRenderer.on('update:download-progress', handler);
     return () => ipcRenderer.removeListener('update:download-progress', handler);
-  }
+  },
+
+  appInfo: () => ipcRenderer.invoke('app:info'),
+  openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args)
 });

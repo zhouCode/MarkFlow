@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, screen, shell } from 'electron';
 import type { Input, Rectangle } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
@@ -88,7 +88,7 @@ const DEFAULT_EDIT_CONTENT_ZOOM: ContentZoomState = { scale: 1 };
 const MARKFLOW_ASSET_PROTOCOL = 'markflow-asset';
 const WINDOW_DOCK_THRESHOLD = 28;
 const MAC_WINDOW_DOCK_GAP = 4;
-const WINDOWS_WINDOW_DOCK_GAP = 0;
+const WINDOWS_WINDOW_DOCK_GAP = -6;
 const DEFAULT_WINDOW_DOCK_GAP = 4;
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
@@ -815,6 +815,35 @@ type UpdateDownloadProgress = {
   total: number;
 };
 
+type AppInfo = {
+  version: string;
+  author: string;
+  repositoryUrl: string;
+};
+
+const APP_INFO_BASE = {
+  author: 'zhouCode',
+  repositoryUrl: 'https://github.com/zhouCode/MarkFlow'
+} as const;
+
+async function resolveAppVersion(): Promise<string> {
+  const packageJsonCandidates = Array.from(
+    new Set([path.join(app.getAppPath(), 'package.json'), path.resolve(__dirname, '../../package.json')])
+  );
+
+  for (const packageJsonPath of packageJsonCandidates) {
+    try {
+      const raw = await fs.readFile(packageJsonPath, 'utf-8');
+      const parsed = JSON.parse(raw) as { version?: unknown };
+      if (typeof parsed.version === 'string' && parsed.version.trim()) return parsed.version;
+    } catch {
+      continue;
+    }
+  }
+
+  return app.getVersion();
+}
+
 ipcMain.handle('update:check', async (): Promise<UpdateCheckResult> => {
   if (isDev()) {
     return { status: 'error', message: 'Update check is not available in development mode' };
@@ -844,6 +873,16 @@ ipcMain.handle('update:download', async () => {
 
 ipcMain.handle('update:install', () => {
   autoUpdater.quitAndInstall(false, true);
+});
+
+ipcMain.handle('app:info', async (): Promise<AppInfo> => ({
+  ...APP_INFO_BASE,
+  version: await resolveAppVersion()
+}));
+
+ipcMain.handle('app:openExternal', async (_evt, args: { url: string }) => {
+  await shell.openExternal(args.url);
+  return { success: true };
 });
 
 autoUpdater.on('download-progress', (progress) => {

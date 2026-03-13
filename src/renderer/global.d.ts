@@ -31,6 +31,12 @@ declare global {
     isMarkdown: boolean;
   };
 
+  type AppInfo = {
+    version: string;
+    author: string;
+    repositoryUrl: string;
+  };
+
   interface Window {
     markflow: {
       platform: string;
@@ -68,6 +74,8 @@ declare global {
       updateDownload: () => Promise<{ success: boolean; message?: string }>;
       updateInstall: () => void;
       onUpdateDownloadProgress: (cb: (payload: { percent: number; transferred: number; total: number }) => void) => () => void;
+      appInfo: () => Promise<AppInfo>;
+      openExternal: (args: { url: string }) => Promise<{ success: boolean }>;
     };
   }
 }

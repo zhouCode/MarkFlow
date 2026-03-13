@@ -53,14 +53,19 @@ export function EditView() {
   const [updateStatus, setUpdateStatus] = React.useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready'>('idle');
   const [updateVersion, setUpdateVersion] = React.useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = React.useState(0);
+  const [appInfo, setAppInfo] = React.useState<AppInfo | null>(null);
+  const [aboutOpen, setAboutOpen] = React.useState(false);
   const [activeAnchor, setActiveAnchor] = React.useState<string | null>(null);
   const [anchorTopById, setAnchorTopById] = React.useState<Record<string, number>>({});
   const [contentScrollHeight, setContentScrollHeight] = React.useState(1);
   const [currentScrollTop, setCurrentScrollTop] = React.useState(0);
+  const [currentViewportHeight, setCurrentViewportHeight] = React.useState(1);
+  const [scrollIndicatorVisible, setScrollIndicatorVisible] = React.useState(false);
   const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
   const previewRef = React.useRef<HTMLDivElement | null>(null);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
+  const scrollIndicatorTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     markdownRef.current = markdown;
@@ -99,6 +104,32 @@ export function EditView() {
     });
     return () => offProgress();
   }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void window.markflow.appInfo().then((info) => {
+      if (!cancelled) setAppInfo(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const revealScrollIndicator = React.useCallback(() => {
+    setScrollIndicatorVisible(true);
+    if (scrollIndicatorTimerRef.current !== null) window.clearTimeout(scrollIndicatorTimerRef.current);
+    scrollIndicatorTimerRef.current = window.setTimeout(() => {
+      setScrollIndicatorVisible(false);
+      scrollIndicatorTimerRef.current = null;
+    }, 700);
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      if (scrollIndicatorTimerRef.current !== null) window.clearTimeout(scrollIndicatorTimerRef.current);
+    },
+    []
+  );
 
   const refreshWorkspace = React.useCallback(async (dirPath: string) => {
     setWorkspaceStatus('loading');
@@ -306,8 +337,12 @@ export function EditView() {
       const syncMetrics = () => {
         setCurrentScrollTop(scroller.scrollTop);
         setContentScrollHeight(scroller.scrollHeight);
+        setCurrentViewportHeight(scroller.clientHeight);
       };
-      const onScroll = () => syncMetrics();
+      const onScroll = () => {
+        syncMetrics();
+        revealScrollIndicator();
+      };
       const resizeObserver = new ResizeObserver(() => {
         cancelAnimationFrame(raf);
         raf = requestAnimationFrame(syncMetrics);
@@ -330,15 +365,19 @@ export function EditView() {
     const scroller = view.scrollDOM;
     const content = view.contentDOM;
 
-    let raf = 0;
-    const syncMetrics = () => {
-      setCurrentScrollTop(scroller.scrollTop);
-      setContentScrollHeight(scroller.scrollHeight);
-    };
-    const onScroll = () => syncMetrics();
-    const resizeObserver = new ResizeObserver(() => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(syncMetrics);
+      let raf = 0;
+      const syncMetrics = () => {
+        setCurrentScrollTop(scroller.scrollTop);
+        setContentScrollHeight(scroller.scrollHeight);
+        setCurrentViewportHeight(scroller.clientHeight);
+      };
+      const onScroll = () => {
+        syncMetrics();
+        revealScrollIndicator();
+      };
+      const resizeObserver = new ResizeObserver(() => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(syncMetrics);
     });
 
     scroller.addEventListener('scroll', onScroll, { passive: true });
@@ -351,7 +390,7 @@ export function EditView() {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
     };
-  }, [leftMode, parsed, markdown, contentZoomScale]);
+  }, [leftMode, parsed, markdown, contentZoomScale, revealScrollIndicator]);
 
   React.useEffect(() => {
     if (leftMode !== 'edit') return;
@@ -619,6 +658,17 @@ export function EditView() {
     return 'Update';
   }, [downloadProgress, updateStatus, updateVersion]);
 
+  const showScrollIndicator = contentScrollHeight > currentViewportHeight + 8;
+  const scrollIndicatorMetrics = React.useMemo(() => {
+    const scrollable = Math.max(contentScrollHeight, 1);
+    const viewport = Math.max(1, currentViewportHeight);
+    const maxScrollTop = Math.max(1, scrollable - viewport);
+    const thumbHeight = Math.max(28, (viewport / scrollable) * viewport);
+    const maxThumbOffset = Math.max(0, viewport - thumbHeight);
+    const thumbTop = maxThumbOffset === 0 ? 0 : (currentScrollTop / maxScrollTop) * maxThumbOffset;
+    return { thumbHeight, thumbTop };
+  }, [contentScrollHeight, currentScrollTop, currentViewportHeight]);
+
   React.useEffect(() => {
     if (!workspaceDirPath) {
       setCollapsedDirPaths(new Set());
@@ -644,10 +694,6 @@ export function EditView() {
   return (
     <div className="appShell">
       <div className="topbar">
-        <div className="topbarBrand">
-          <span className="topbarTitle">MarkFlow</span>
-          <span className="topbarCaption">{leftMode === 'edit' ? 'Editor' : 'Preview'}</span>
-        </div>
         <div className="topbarMain">
           <div className="toolbarGroup">
             <button
@@ -681,6 +727,9 @@ export function EditView() {
         </div>
         <div className="topbarAside">
           <div className="toolbarGroup">
+            <button className={`btn ${aboutOpen ? 'active' : ''}`} onClick={() => setAboutOpen((open) => !open)}>
+              About
+            </button>
             <button className="btn" onClick={() => toggleTheme()}>
               Theme
             </button>
@@ -707,6 +756,44 @@ export function EditView() {
           </button>
         </div>
       </div>
+
+      {aboutOpen ? (
+        <div className="aboutOverlay" onClick={() => setAboutOpen(false)}>
+          <div className="aboutPanel" onClick={(event) => event.stopPropagation()}>
+            <div className="aboutHeader">
+              <div>
+                <div className="aboutTitle">About MarkFlow</div>
+                <div className="aboutCaption">Application Information</div>
+              </div>
+              <button className="btn" onClick={() => setAboutOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="aboutBody">
+              <div className="aboutRow">
+                <span className="aboutLabel">Author</span>
+                <span className="aboutValue">{appInfo?.author ?? 'Loading...'}</span>
+              </div>
+              <div className="aboutRow">
+                <span className="aboutLabel">Version</span>
+                <span className="aboutValue">{appInfo?.version ?? 'Loading...'}</span>
+              </div>
+              <div className="aboutRow">
+                <span className="aboutLabel">Repository</span>
+                <button
+                  className="aboutLink"
+                  onClick={() => {
+                    if (!appInfo?.repositoryUrl) return;
+                    void window.markflow.openExternal({ url: appInfo.repositoryUrl });
+                  }}
+                >
+                  {appInfo?.repositoryUrl ?? 'Loading...'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="appMain editorWorkspace" style={contentZoomStyle}>
         <div className={`workspaceSplit ${sidebarOpen ? 'withSidebar' : 'withoutSidebar'}`}>
@@ -823,6 +910,17 @@ export function EditView() {
                 />
               </div>
             )}
+            {showScrollIndicator ? (
+              <div className={`scrollIndicator ${scrollIndicatorVisible ? 'visible' : ''}`} aria-hidden="true">
+                <div
+                  className="scrollIndicatorThumb"
+                  style={{
+                    height: `${scrollIndicatorMetrics.thumbHeight}px`,
+                    transform: `translateY(${scrollIndicatorMetrics.thumbTop}px)`
+                  }}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
