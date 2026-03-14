@@ -452,7 +452,7 @@ function getDockedCompanionBounds(anchorBounds: Rectangle, companionBounds: Rect
 
 function applyDockedBounds(window: BrowserWindow, bounds: Rectangle) {
   isApplyingDockBounds = true;
-  window.setBounds(bounds);
+  window.setPosition(bounds.x, bounds.y);
   setImmediate(() => {
     isApplyingDockBounds = false;
   });
