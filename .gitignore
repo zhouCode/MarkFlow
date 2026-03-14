@@ -6,4 +6,5 @@ dist_electron/
 .factory/
 .claude/
 .codex/
+.opencode/
 
