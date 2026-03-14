@@ -49,6 +49,7 @@ type NotesWindowSettings = {
 
 type PersistedState = {
   lastDocPath: string | null;
+  lastWorkspaceDirPath: string | null;
   notesSettings: NotesWindowSettings;
 };
 
@@ -118,6 +119,7 @@ let editWindow: BrowserWindow | null = null;
 let notesWindow: BrowserWindow | null = null;
 
 let currentDocPath: string | null = null;
+let currentWorkspaceDirPath: string | null = null;
 let currentMarkdown = '';
 let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 let notesContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
@@ -144,10 +146,11 @@ async function readPersistedState(): Promise<PersistedState> {
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
     return {
       lastDocPath: typeof parsed.lastDocPath === 'string' ? parsed.lastDocPath : null,
+      lastWorkspaceDirPath: typeof parsed.lastWorkspaceDirPath === 'string' ? parsed.lastWorkspaceDirPath : null,
       notesSettings: sanitizedNotesSettings(parsed.notesSettings)
     };
   } catch {
-    return { lastDocPath: null, notesSettings: { ...DEFAULT_NOTES_SETTINGS } };
+    return { lastDocPath: null, lastWorkspaceDirPath: null, notesSettings: { ...DEFAULT_NOTES_SETTINGS } };
   }
 }
 
@@ -157,6 +160,7 @@ async function writePersistedState(state: PersistedState): Promise<void> {
     stateFilePath(),
     JSON.stringify({
       lastDocPath: state.lastDocPath,
+      lastWorkspaceDirPath: state.lastWorkspaceDirPath,
       notesSettings: sanitizedNotesSettings(state.notesSettings)
     }),
     'utf-8'
@@ -189,7 +193,7 @@ async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
   currentDocPath = filePath;
   currentMarkdown = markdown;
-  await writeCurrentPersistedState(filePath);
+  await writeCurrentPersistedState({ lastDocPath: filePath });
   return { docPath: currentDocPath, markdown: currentMarkdown };
 }
 
@@ -306,8 +310,20 @@ function notesSettingsState(): NotesWindowSettings {
   return { ...notesSettings };
 }
 
-async function writeCurrentPersistedState(lastDocPath: string | null = currentDocPath): Promise<void> {
-  await writePersistedState({ lastDocPath, notesSettings });
+async function writeCurrentPersistedState(
+  input: Partial<Pick<PersistedState, 'lastDocPath' | 'lastWorkspaceDirPath'>> = {}
+): Promise<void> {
+  await writePersistedState({
+    lastDocPath: input.lastDocPath ?? currentDocPath,
+    lastWorkspaceDirPath: input.lastWorkspaceDirPath ?? currentWorkspaceDirPath,
+    notesSettings
+  });
+}
+
+async function setCurrentWorkspaceDirPath(dirPath: string | null): Promise<string | null> {
+  currentWorkspaceDirPath = dirPath ? path.resolve(dirPath) : null;
+  await writeCurrentPersistedState();
+  return currentWorkspaceDirPath;
 }
 
 async function updateNotesSettings(input: Partial<NotesWindowSettings> | null | undefined): Promise<NotesWindowSettings> {
@@ -775,6 +791,7 @@ app.whenReady().then(async () => {
   }
 
   const persisted = await readPersistedState();
+  currentWorkspaceDirPath = persisted.lastWorkspaceDirPath ? path.resolve(persisted.lastWorkspaceDirPath) : null;
   notesSettings = persisted.notesSettings;
   if (notesSettings.syncZoomWithEdit) {
     notesContentZoom = editContentZoom;
@@ -786,7 +803,7 @@ app.whenReady().then(async () => {
         editWindow?.webContents.send('doc:update', restored);
       });
     } catch {
-      await writeCurrentPersistedState(null);
+      await writeCurrentPersistedState({ lastDocPath: null });
     }
   }
 
@@ -823,7 +840,7 @@ app.whenReady().then(async () => {
     await fs.writeFile(filePath, args.markdown, 'utf-8');
     currentDocPath = filePath;
     currentMarkdown = args.markdown;
-    await writeCurrentPersistedState(filePath);
+    await writeCurrentPersistedState({ lastDocPath: filePath });
     editWindow.webContents.send('doc:saved', { docPath: currentDocPath });
     return { docPath: currentDocPath };
   });
@@ -835,7 +852,9 @@ app.whenReady().then(async () => {
       properties: ['openDirectory']
     });
     if (res.canceled || res.filePaths.length === 0) return null;
-    return { dirPath: res.filePaths[0]! };
+    const dirPath = path.resolve(res.filePaths[0]!);
+    await setCurrentWorkspaceDirPath(dirPath);
+    return { dirPath };
   });
 
   ipcMain.handle('folder:list', async (_evt, args: { dirPath: string }) => {
@@ -844,10 +863,15 @@ app.whenReady().then(async () => {
     if (!stats.isDirectory()) {
       throw new Error('Selected path is not a directory.');
     }
+    await setCurrentWorkspaceDirPath(dirPath);
     return {
       dirPath,
       entries: await listDirectoryTree(dirPath)
     };
+  });
+
+  ipcMain.handle('workspace:state:get', async () => {
+    return { dirPath: currentWorkspaceDirPath };
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {

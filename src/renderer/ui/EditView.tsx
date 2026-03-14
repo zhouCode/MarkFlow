@@ -199,6 +199,24 @@ export function EditView() {
   }, []);
 
   React.useEffect(() => {
+    let cancelled = false;
+    void window.markflow
+      .workspaceStateGet()
+      .then((state) => {
+        if (cancelled || !state.dirPath) return;
+        return refreshWorkspace(state.dirPath);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setWorkspaceStatus('error');
+        setWorkspaceError(error instanceof Error ? error.message : '恢复上次文件夹失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshWorkspace]);
+
+  React.useEffect(() => {
     if (!docPath) return;
     if (workspaceDirPath && isPathInsideDir(docPath, workspaceDirPath)) return;
     const dirPath = getParentDirPath(docPath);

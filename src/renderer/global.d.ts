@@ -55,6 +55,7 @@ declare global {
       docSetMarkdown: (args: { docPath: string | null; markdown: string }) => void;
       folderOpen: () => Promise<{ dirPath: string } | null>;
       folderList: (args: { dirPath: string }) => Promise<{ dirPath: string; entries: FileBrowserEntry[] }>;
+      workspaceStateGet: () => Promise<{ dirPath: string | null }>;
 
       contentZoomIn: () => void;
       contentZoomOut: () => void;
