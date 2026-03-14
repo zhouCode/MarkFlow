@@ -21,7 +21,13 @@ export function NotesView() {
     const offUpdate = window.markflow.onNotesUpdate((payload) => {
       setState(payload);
     });
-    return () => offUpdate();
+    const offZoom = window.markflow.onContentZoomUpdate((payload) => {
+      setState((prev) => ({ ...prev, zoomScale: payload.scale }));
+    });
+    return () => {
+      offUpdate();
+      offZoom();
+    };
   }, []);
 
   React.useLayoutEffect(() => {

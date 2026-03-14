@@ -4,6 +4,11 @@ export type ContentZoomState = {
   scale: number;
 };
 
+export type NotesWindowSettings = {
+  syncZoomWithEdit: boolean;
+  syncDockWithEdit: boolean;
+};
+
 export type FileBrowserEntry = {
   name: string;
   path: string;
@@ -64,9 +69,12 @@ contextBridge.exposeInMainWorld('markflow', {
   contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),
   contentZoomReset: () => ipcRenderer.send('contentZoom:adjust', 'reset'),
 
+  notesSettingsGet: () => ipcRenderer.invoke('notes:settings:get'),
+  notesSettingsSet: (input: Partial<NotesWindowSettings>) => ipcRenderer.invoke('notes:settings:set', input),
   notesOpen: () => ipcRenderer.send('notes:open'),
   notesClose: () => ipcRenderer.send('notes:close'),
   notesUpdate: (payload: NotesWindowState) => ipcRenderer.send('notes:update', payload),
+
   notesNavigateTo: (payload: { anchorId: string }) => ipcRenderer.send('notes:navigateTo', payload),
   notesScrollTo: (payload: { progress: number }) => ipcRenderer.send('notes:scrollTo', payload),
 

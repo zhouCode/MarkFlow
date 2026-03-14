@@ -48,6 +48,10 @@ export function EditView() {
   const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [notesWindowOpen, setNotesWindowOpen] = React.useState(false);
+  const [notesSettings, setNotesSettings] = React.useState<NotesWindowSettings>({
+    syncZoomWithEdit: true,
+    syncDockWithEdit: true
+  });
   const [noteHtmlById, setNoteHtmlById] = React.useState<Record<string, string>>({});
   const [contentZoomScale, setContentZoomScale] = React.useState(1);
   const [updateStatus, setUpdateStatus] = React.useState<'idle' | 'checking' | 'available' | 'downloading' | 'ready'>('idle');
@@ -65,11 +69,22 @@ export function EditView() {
   const previewRef = React.useRef<HTMLDivElement | null>(null);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
+  const docPathRef = React.useRef<string | null>(docPath);
+  const notesWindowOpenRef = React.useRef(notesWindowOpen);
+  const handleOpenFileRef = React.useRef<() => Promise<void>>(async () => {});
   const scrollIndicatorTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     markdownRef.current = markdown;
   }, [markdown]);
+
+  React.useEffect(() => {
+    docPathRef.current = docPath;
+  }, [docPath]);
+
+  React.useEffect(() => {
+    notesWindowOpenRef.current = notesWindowOpen;
+  }, [notesWindowOpen]);
 
   React.useEffect(() => {
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
@@ -93,6 +108,7 @@ export function EditView() {
 
   React.useEffect(() => {
     const offClosed = window.markflow.onNotesClosed(() => {
+      notesWindowOpenRef.current = false;
       setNotesWindowOpen(false);
     });
     return () => offClosed();
@@ -107,12 +123,37 @@ export function EditView() {
 
   React.useEffect(() => {
     let cancelled = false;
+    void window.markflow
+      .notesSettingsGet()
+      .then((settings) => {
+        if (!cancelled) setNotesSettings(settings);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        alert(error instanceof Error ? error.message : '读取 Notes 设置失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
     void window.markflow.appInfo().then((info) => {
       if (!cancelled) setAppInfo(info);
     });
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const updateNotesSettings = React.useCallback(async (input: Partial<NotesWindowSettings>) => {
+    try {
+      const nextSettings = await window.markflow.notesSettingsSet(input);
+      setNotesSettings(nextSettings);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '更新 Notes 设置失败');
+    }
   }, []);
 
   const revealScrollIndicator = React.useCallback(() => {
@@ -223,6 +264,10 @@ export function EditView() {
       alert(error instanceof Error ? error.message : '打开文件失败');
     }
   }, [confirmSwitchIfDirty]);
+
+  React.useEffect(() => {
+    handleOpenFileRef.current = handleOpenFile;
+  }, [handleOpenFile]);
 
   const handleOpenFolder = React.useCallback(async () => {
     try {
@@ -501,17 +546,21 @@ export function EditView() {
       }
       if (e.key === 'F5') {
         e.preventDefault();
-        setNotesWindowOpen((open) => {
-          const next = !open;
-          if (next) window.markflow.notesOpen();
-          else window.markflow.notesClose();
-          return next;
-        });
+        const next = !notesWindowOpenRef.current;
+        notesWindowOpenRef.current = next;
+        setNotesWindowOpen(next);
+        if (next) window.markflow.notesOpen();
+        else window.markflow.notesClose();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        void handleOpenFileRef.current();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        window.markflow.docSave({ docPath, markdown });
+        window.markflow.docSave({ docPath: docPathRef.current, markdown: markdownRef.current });
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
@@ -529,15 +578,16 @@ export function EditView() {
         setAboutOpen((open) => !open);
         return;
       }
-      if (e.key === 'Escape' && notesWindowOpen) {
+      if (e.key === 'Escape' && notesWindowOpenRef.current) {
         e.preventDefault();
+        notesWindowOpenRef.current = false;
         setNotesWindowOpen(false);
         window.markflow.notesClose();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [docPath, markdown, notesWindowOpen]);
+  }, []);
 
   const dirty = markdown !== lastSavedMarkdown;
   const entryByPath = React.useMemo(() => new Map(workspaceEntries.map((entry) => [entry.path, entry])), [workspaceEntries]);
@@ -727,7 +777,7 @@ export function EditView() {
           </div>
           <div className="toolbarGroup">
             <button
-              className={`btn ${sidebarOpen ? 'active' : ''}`}
+              className={`btn toggleBtn ${sidebarOpen ? 'active' : ''}`}
               title="Toggle Files Sidebar (Ctrl/Cmd+B)"
               onClick={() => setSidebarOpen((open) => !open)}
             >
@@ -763,20 +813,41 @@ export function EditView() {
               {updateButtonLabel}
             </button>
           </div>
-          <button
-            className={`btn ${notesWindowOpen ? 'active' : ''}`}
-            title="Toggle Notes Window (F5)"
-            onClick={() => {
-              setNotesWindowOpen((open) => {
-                const next = !open;
-                if (next) window.markflow.notesOpen();
-                else window.markflow.notesClose();
-                return next;
-              });
-            }}
-          >
-            Notes
-          </button>
+          <div className="toolbarGroup">
+            <button
+              className={`btn toggleBtn ${notesWindowOpen ? 'active' : ''}`}
+              title="Toggle Notes Window (F5)"
+              onClick={() => {
+                setNotesWindowOpen((open) => {
+                  const next = !open;
+                  notesWindowOpenRef.current = next;
+                  if (next) window.markflow.notesOpen();
+                  else window.markflow.notesClose();
+                  return next;
+                });
+              }}
+            >
+              Notes
+            </button>
+            <button
+              className={`btn toggleBtn ${notesSettings.syncZoomWithEdit ? 'active' : ''}`}
+              title="Toggle Notes zoom sync with editor"
+              onClick={() => {
+                void updateNotesSettings({ syncZoomWithEdit: !notesSettings.syncZoomWithEdit });
+              }}
+            >
+              Zoom Sync
+            </button>
+            <button
+              className={`btn toggleBtn ${notesSettings.syncDockWithEdit ? 'active' : ''}`}
+              title="Toggle Notes dock sync with editor"
+              onClick={() => {
+                void updateNotesSettings({ syncDockWithEdit: !notesSettings.syncDockWithEdit });
+              }}
+            >
+              Dock Sync
+            </button>
+          </div>
         </div>
       </div>
 
@@ -922,6 +993,7 @@ export function EditView() {
                     view.contentDOM.style.minHeight = '100%';
                   }}
                   onChange={(value) => {
+                    markdownRef.current = value;
                     setMarkdown(value);
                     window.markflow.docSetMarkdown({ docPath, markdown: value });
                   }}

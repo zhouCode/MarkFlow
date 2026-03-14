@@ -42,8 +42,14 @@ type NotesWindowState = {
   zoomScale: number;
 };
 
+type NotesWindowSettings = {
+  syncZoomWithEdit: boolean;
+  syncDockWithEdit: boolean;
+};
+
 type PersistedState = {
   lastDocPath: string | null;
+  notesSettings: NotesWindowSettings;
 };
 
 type ZoomAction = 'in' | 'out' | 'reset';
@@ -90,6 +96,10 @@ const WINDOW_DOCK_THRESHOLD = 28;
 const MAC_WINDOW_DOCK_GAP = 4;
 const WINDOWS_WINDOW_DOCK_GAP = -10;
 const DEFAULT_WINDOW_DOCK_GAP = 4;
+const DEFAULT_NOTES_SETTINGS: NotesWindowSettings = {
+  syncZoomWithEdit: true,
+  syncDockWithEdit: true
+};
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
 
@@ -110,6 +120,8 @@ let notesWindow: BrowserWindow | null = null;
 let currentDocPath: string | null = null;
 let currentMarkdown = '';
 let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
+let notesContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
+let notesSettings: NotesWindowSettings = { ...DEFAULT_NOTES_SETTINGS };
 let pendingOpenState: PendingOpenState = { filePath: null };
 let currentNotesState: NotesWindowState | null = null;
 let notesDockState: DockState | null = null;
@@ -119,19 +131,36 @@ function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
 }
 
+function sanitizedNotesSettings(input: Partial<NotesWindowSettings> | null | undefined): NotesWindowSettings {
+  return {
+    syncZoomWithEdit: typeof input?.syncZoomWithEdit === 'boolean' ? input.syncZoomWithEdit : DEFAULT_NOTES_SETTINGS.syncZoomWithEdit,
+    syncDockWithEdit: typeof input?.syncDockWithEdit === 'boolean' ? input.syncDockWithEdit : DEFAULT_NOTES_SETTINGS.syncDockWithEdit
+  };
+}
+
 async function readPersistedState(): Promise<PersistedState> {
   try {
     const raw = await fs.readFile(stateFilePath(), 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
-    return { lastDocPath: typeof parsed.lastDocPath === 'string' ? parsed.lastDocPath : null };
+    return {
+      lastDocPath: typeof parsed.lastDocPath === 'string' ? parsed.lastDocPath : null,
+      notesSettings: sanitizedNotesSettings(parsed.notesSettings)
+    };
   } catch {
-    return { lastDocPath: null };
+    return { lastDocPath: null, notesSettings: { ...DEFAULT_NOTES_SETTINGS } };
   }
 }
 
 async function writePersistedState(state: PersistedState): Promise<void> {
   await fs.mkdir(path.dirname(stateFilePath()), { recursive: true });
-  await fs.writeFile(stateFilePath(), JSON.stringify(state), 'utf-8');
+  await fs.writeFile(
+    stateFilePath(),
+    JSON.stringify({
+      lastDocPath: state.lastDocPath,
+      notesSettings: sanitizedNotesSettings(state.notesSettings)
+    }),
+    'utf-8'
+  );
 }
 
 function looksLikeMarkdownPath(filePath: string | null | undefined): filePath is string {
@@ -160,7 +189,7 @@ async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
   currentDocPath = filePath;
   currentMarkdown = markdown;
-  await writePersistedState({ lastDocPath: filePath });
+  await writeCurrentPersistedState(filePath);
   return { docPath: currentDocPath, markdown: currentMarkdown };
 }
 
@@ -269,10 +298,49 @@ function currentEditContentZoomState(): ContentZoomState {
   return { scale: editContentZoom };
 }
 
+function notesContentZoomState(): ContentZoomState {
+  return { scale: notesSettings.syncZoomWithEdit ? editContentZoom : notesContentZoom };
+}
+
+function notesSettingsState(): NotesWindowSettings {
+  return { ...notesSettings };
+}
+
+async function writeCurrentPersistedState(lastDocPath: string | null = currentDocPath): Promise<void> {
+  await writePersistedState({ lastDocPath, notesSettings });
+}
+
+async function updateNotesSettings(input: Partial<NotesWindowSettings> | null | undefined): Promise<NotesWindowSettings> {
+  const nextSettings = sanitizedNotesSettings({ ...notesSettings, ...input });
+  const prevSettings = notesSettings;
+
+  if (prevSettings.syncZoomWithEdit && !nextSettings.syncZoomWithEdit) {
+    notesContentZoom = editContentZoom;
+  }
+
+  notesSettings = nextSettings;
+
+  if (!nextSettings.syncDockWithEdit) {
+    notesDockState = null;
+  } else if (!prevSettings.syncDockWithEdit) {
+    refreshNotesDockState();
+  }
+
+  await writeCurrentPersistedState();
+  broadcastContentZoom();
+  return notesSettingsState();
+}
+
 function broadcastContentZoom() {
-  const state = currentEditContentZoomState();
-  editWindow?.webContents.send('contentZoom:update', state);
-  notesWindow?.webContents.send('contentZoom:update', state);
+  const nextNotesZoom = notesContentZoomState().scale;
+  if (currentNotesState) {
+    currentNotesState = {
+      ...currentNotesState,
+      zoomScale: nextNotesZoom
+    };
+  }
+  editWindow?.webContents.send('contentZoom:update', currentEditContentZoomState());
+  notesWindow?.webContents.send('contentZoom:update', { scale: nextNotesZoom });
 }
 
 function setWindowPageZoom(window: BrowserWindow) {
@@ -291,14 +359,20 @@ function adjustEditContentZoom(action: ZoomAction) {
   broadcastContentZoom();
 }
 
-function adjustWindowZoom(window: BrowserWindow, action: ZoomAction) {
-  const { webContents } = window;
-  if (action === 'reset') {
-    webContents.setZoomLevel(0);
+function adjustNotesContentZoom(action: ZoomAction) {
+  if (notesSettings.syncZoomWithEdit) {
+    adjustEditContentZoom(action);
     return;
   }
-  const delta = action === 'in' ? 1 : -1;
-  webContents.setZoomLevel(webContents.getZoomLevel() + delta);
+
+  if (action === 'reset') {
+    notesContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
+  } else {
+    const delta = action === 'in' ? EDIT_CONTENT_ZOOM_STEP : -EDIT_CONTENT_ZOOM_STEP;
+    notesContentZoom = clampEditContentZoom(notesContentZoom + delta);
+  }
+  if (notesWindow) setWindowPageZoom(notesWindow);
+  broadcastContentZoom();
 }
 
 function getZoomAction(input: Input): ZoomAction | null {
@@ -331,16 +405,16 @@ function getZoomAction(input: Input): ZoomAction | null {
   }
 }
 
-function registerZoomShortcuts(window: BrowserWindow, options?: { useContentZoom?: boolean }) {
+function registerZoomShortcuts(window: BrowserWindow, target: 'edit' | 'notes') {
   window.webContents.on('before-input-event', (event, input) => {
     const action = getZoomAction(input);
     if (!action) return;
     event.preventDefault();
-    if (options?.useContentZoom) {
+    if (target === 'edit') {
       adjustEditContentZoom(action);
       return;
     }
-    adjustWindowZoom(window, action);
+    adjustNotesContentZoom(action);
   });
 }
 
@@ -459,6 +533,7 @@ function applyDockedBounds(window: BrowserWindow, bounds: Rectangle) {
 }
 
 function syncDockedNotesWindow() {
+  if (!notesSettings.syncDockWithEdit) return;
   if (!editWindow || !notesWindow || !notesDockState) return;
   if (notesWindow.isDestroyed() || notesWindow.isMinimized() || notesWindow.isMaximized() || notesWindow.isFullScreen()) {
     return;
@@ -468,6 +543,10 @@ function syncDockedNotesWindow() {
 }
 
 function refreshNotesDockState() {
+  if (!notesSettings.syncDockWithEdit) {
+    notesDockState = null;
+    return;
+  }
   if (!editWindow || !notesWindow) return;
   if (isApplyingDockBounds || notesWindow.isMinimized() || notesWindow.isMaximized() || notesWindow.isFullScreen()) return;
 
@@ -548,7 +627,7 @@ function createEditWindow() {
       backgroundThrottling: false
     }
   });
-  registerZoomShortcuts(editWindow, { useContentZoom: true });
+  registerZoomShortcuts(editWindow, 'edit');
   setWindowPageZoom(editWindow);
   editWindow.webContents.on('did-finish-load', () => {
     setWindowPageZoom(editWindow!);
@@ -604,14 +683,15 @@ function createNotesWindow() {
     }
   });
 
-  registerZoomShortcuts(notesWindow, { useContentZoom: true });
+  registerZoomShortcuts(notesWindow, 'notes');
   setWindowPageZoom(notesWindow);
-  notesDockState = placement.dockState;
+  notesDockState = notesSettings.syncDockWithEdit ? placement.dockState : null;
   notesWindow.loadURL(getRendererUrl('notes'));
   notesWindow.setMenuBarVisibility(false);
 
   const pushInitial = () => {
     setWindowPageZoom(notesWindow!);
+    notesWindow?.webContents.send('contentZoom:update', notesContentZoomState());
     if (currentNotesState) {
       notesWindow?.webContents.send('notes:update', currentNotesState);
     }
@@ -695,6 +775,10 @@ app.whenReady().then(async () => {
   }
 
   const persisted = await readPersistedState();
+  notesSettings = persisted.notesSettings;
+  if (notesSettings.syncZoomWithEdit) {
+    notesContentZoom = editContentZoom;
+  }
   if (persisted.lastDocPath) {
     try {
       const restored = await loadDocument(persisted.lastDocPath);
@@ -702,7 +786,7 @@ app.whenReady().then(async () => {
         editWindow?.webContents.send('doc:update', restored);
       });
     } catch {
-      await writePersistedState({ lastDocPath: null });
+      await writeCurrentPersistedState(null);
     }
   }
 
@@ -739,7 +823,7 @@ app.whenReady().then(async () => {
     await fs.writeFile(filePath, args.markdown, 'utf-8');
     currentDocPath = filePath;
     currentMarkdown = args.markdown;
-    await writePersistedState({ lastDocPath: filePath });
+    await writeCurrentPersistedState(filePath);
     editWindow.webContents.send('doc:saved', { docPath: currentDocPath });
     return { docPath: currentDocPath };
   });
@@ -775,6 +859,14 @@ app.whenReady().then(async () => {
     adjustEditContentZoom(action);
   });
 
+  ipcMain.handle('notes:settings:get', async () => {
+    return notesSettingsState();
+  });
+
+  ipcMain.handle('notes:settings:set', async (_evt, input: Partial<NotesWindowSettings> | null | undefined) => {
+    return updateNotesSettings(input);
+  });
+
   ipcMain.on('notes:open', () => {
     createNotesWindow();
   });
@@ -786,8 +878,12 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on('notes:update', (_evt, payload: NotesWindowState) => {
-    currentNotesState = payload;
-    forwardToNotes('notes:update', payload);
+    const nextState: NotesWindowState = {
+      ...payload,
+      zoomScale: notesContentZoomState().scale
+    };
+    currentNotesState = nextState;
+    forwardToNotes('notes:update', nextState);
   });
 
   ipcMain.on('notes:navigateTo', (_evt, payload: { anchorId: string }) => {

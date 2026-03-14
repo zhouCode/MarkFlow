@@ -22,6 +22,15 @@ declare global {
     zoomScale: number;
   };
 
+  type ContentZoomState = {
+    scale: number;
+  };
+
+  type NotesWindowSettings = {
+    syncZoomWithEdit: boolean;
+    syncDockWithEdit: boolean;
+  };
+
   type FileBrowserEntry = {
     name: string;
     path: string;
@@ -51,6 +60,8 @@ declare global {
       contentZoomOut: () => void;
       contentZoomReset: () => void;
 
+      notesSettingsGet: () => Promise<NotesWindowSettings>;
+      notesSettingsSet: (input: Partial<NotesWindowSettings>) => Promise<NotesWindowSettings>;
       notesOpen: () => void;
       notesClose: () => void;
       notesUpdate: (payload: NotesWindowState) => void;
@@ -59,7 +70,7 @@ declare global {
 
       onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
       onDocSaved: (cb: (payload: { docPath: string | null }) => void) => () => void;
-      onContentZoomUpdate: (cb: (payload: { scale: number }) => void) => () => void;
+      onContentZoomUpdate: (cb: (payload: ContentZoomState) => void) => () => void;
 
       onNotesUpdate: (cb: (payload: NotesWindowState) => void) => () => void;
       onNotesClosed: (cb: () => void) => () => void;
