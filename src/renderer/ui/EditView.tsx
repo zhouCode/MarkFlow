@@ -9,6 +9,26 @@ import { renderInlineMarkdown } from '../markdown/parse';
 import { useTheme } from './theme';
 
 type WorkspaceStatus = 'idle' | 'loading' | 'ready' | 'error';
+type ScrollDebugState = {
+  lastAction: string;
+  fromMode: 'preview' | 'edit' | null;
+  toMode: 'preview' | 'edit' | null;
+  attempt: number;
+  capturedTop: number | null;
+  targetTop: number | null;
+  actualTop: number | null;
+};
+type BlockMetric = {
+  anchorId: string;
+  startLine: number;
+  endLine: number;
+  top: number;
+  bottom: number;
+};
+type PendingScrollRestore = {
+  line: number | null;
+  progress: number;
+};
 
 function getParentDirPath(filePath: string): string | null {
   const normalized = filePath.replace(/[\\/]+$/, '');
@@ -34,6 +54,42 @@ function isPathInsideDir(filePath: string, dirPath: string): boolean {
   return normalizedFile.startsWith(`${normalizedDir}${separator}`);
 }
 
+function clampValue(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function findBlockAtCenter(centerTop: number, metrics: BlockMetric[]): BlockMetric | null {
+  if (metrics.length === 0) return null;
+  let fallback = metrics[0]!;
+  for (const metric of metrics) {
+    if (centerTop >= metric.top && centerTop <= metric.bottom) return metric;
+    if (metric.top <= centerTop) fallback = metric;
+    else break;
+  }
+  return fallback;
+}
+
+function lineFromBlockMetric(centerTop: number, block: BlockMetric | null): number | null {
+  if (!block) return null;
+  const blockHeight = Math.max(block.bottom - block.top, 1);
+  const ratio = clampValue((centerTop - block.top) / blockHeight, 0, 1);
+  const lineSpan = Math.max(block.endLine - block.startLine, 0);
+  return block.startLine + ratio * lineSpan;
+}
+
+function blockForLine(line: number, metrics: BlockMetric[]): BlockMetric | null {
+  if (metrics.length === 0) return null;
+  for (const metric of metrics) {
+    if (line >= metric.startLine && line <= metric.endLine) return metric;
+  }
+  let fallback = metrics[0]!;
+  for (const metric of metrics) {
+    if (metric.startLine <= line) fallback = metric;
+    else break;
+  }
+  return fallback;
+}
+
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
@@ -43,7 +99,19 @@ export function EditView() {
   const [workspaceEntries, setWorkspaceEntries] = React.useState<FileBrowserEntry[]>([]);
   const [workspaceStatus, setWorkspaceStatus] = React.useState<WorkspaceStatus>('idle');
   const [workspaceError, setWorkspaceError] = React.useState<string | null>(null);
+  const [workspaceRestoreResolved, setWorkspaceRestoreResolved] = React.useState(false);
+  const [scrollDebugOpen, setScrollDebugOpen] = React.useState(false);
+  const [scrollDebugState, setScrollDebugState] = React.useState<ScrollDebugState>({
+    lastAction: 'idle',
+    fromMode: null,
+    toMode: null,
+    attempt: 0,
+    capturedTop: null,
+    targetTop: null,
+    actualTop: null
+  });
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
+  const [editorViewVersion, setEditorViewVersion] = React.useState(0);
   const [collapsedDirPaths, setCollapsedDirPaths] = React.useState<Set<string>>(() => new Set());
   const { parsed } = useParsedDoc(markdown, docPath);
   const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
@@ -73,6 +141,8 @@ export function EditView() {
   const notesWindowOpenRef = React.useRef(notesWindowOpen);
   const handleOpenFileRef = React.useRef<() => Promise<void>>(async () => {});
   const scrollIndicatorTimerRef = React.useRef<number | null>(null);
+  const modeScrollTopRef = React.useRef<{ preview: number; edit: number }>({ preview: 0, edit: 0 });
+  const pendingScrollRestoreRef = React.useRef<PendingScrollRestore | null>(null);
 
   React.useEffect(() => {
     markdownRef.current = markdown;
@@ -88,6 +158,8 @@ export function EditView() {
 
   React.useEffect(() => {
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
+      modeScrollTopRef.current = { preview: 0, edit: 0 };
+      pendingScrollRestoreRef.current = null;
       setDocPath(payload.docPath);
       setMarkdown(payload.markdown);
       setLastSavedMarkdown(payload.markdown);
@@ -172,6 +244,175 @@ export function EditView() {
     []
   );
 
+  const syncScrollerMetrics = React.useCallback((scroller: HTMLElement) => {
+    setCurrentScrollTop(scroller.scrollTop);
+    setContentScrollHeight(scroller.scrollHeight);
+    setCurrentViewportHeight(scroller.clientHeight);
+  }, []);
+
+  const getScrollProgress = React.useCallback((scroller: HTMLElement) => {
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    if (max === 0) return 0;
+    return Math.max(0, Math.min(1, scroller.scrollTop / max));
+  }, []);
+
+  const previewBlockMetrics = React.useMemo<BlockMetric[]>(() => {
+    if (!parsed) return [];
+    const root = previewRef.current;
+    if (!root) return [];
+    return parsed.anchors
+      .map((anchor) => {
+        const element = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchor.anchorId)}"]`);
+        if (!element) return null;
+        return {
+          anchorId: anchor.anchorId,
+          startLine: anchor.sourceRange.startLine,
+          endLine: anchor.sourceRange.endLine,
+          top: element.offsetTop,
+          bottom: element.offsetTop + element.offsetHeight
+        };
+      })
+      .filter((metric): metric is BlockMetric => Boolean(metric))
+      .sort((a, b) => a.top - b.top);
+  }, [anchorTopById, parsed]);
+
+  const editorBlockMetrics = React.useMemo<BlockMetric[]>(() => {
+    const view = editorViewRef.current;
+    if (!view || !parsed) return [];
+    return parsed.anchors
+      .map((anchor) => {
+        const safeStartLine = Math.max(1, Math.min(anchor.sourceRange.startLine, view.state.doc.lines));
+        const safeEndLine = Math.max(safeStartLine, Math.min(anchor.sourceRange.endLine, view.state.doc.lines));
+        const startPos = view.state.doc.line(safeStartLine).from;
+        const endPos = view.state.doc.line(safeEndLine).to;
+        const startBlock = view.lineBlockAt(startPos);
+        const endBlock = view.lineBlockAt(endPos);
+        return {
+          anchorId: anchor.anchorId,
+          startLine: anchor.sourceRange.startLine,
+          endLine: anchor.sourceRange.endLine,
+          top: startBlock.top,
+          bottom: endBlock.bottom
+        };
+      })
+      .sort((a, b) => a.top - b.top);
+  }, [editorViewVersion, parsed, markdown, contentZoomScale]);
+
+  const captureModeScrollTop = React.useCallback((mode: 'preview' | 'edit') => {
+    const scroller = mode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
+    if (!scroller) return;
+    const capturedTop = scroller.scrollTop;
+    modeScrollTopRef.current[mode] = capturedTop;
+    setScrollDebugState({
+      lastAction: 'capture',
+      fromMode: mode,
+      toMode: mode === 'preview' ? 'edit' : 'preview',
+      attempt: 0,
+      capturedTop,
+      targetTop: modeScrollTopRef.current[mode],
+      actualTop: capturedTop
+    });
+  }, []);
+
+  const restoreModeScrollTop = React.useCallback(
+    (mode: 'preview' | 'edit', action: 'restore' | 'create' = 'restore', attempt = 1) => {
+      const scroller = mode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
+      if (!scroller) {
+        setScrollDebugState({
+          lastAction: `${action}-waiting`,
+          fromMode: mode === 'preview' ? 'edit' : 'preview',
+          toMode: mode,
+          attempt,
+          capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
+          targetTop: modeScrollTopRef.current[mode],
+          actualTop: null
+        });
+        return false;
+      }
+
+      const metrics = mode === 'preview' ? previewBlockMetrics : editorBlockMetrics;
+      const pendingRestore = pendingScrollRestoreRef.current;
+      if (pendingRestore && parsed && parsed.anchors.length > 0 && metrics.length === 0) {
+        setScrollDebugState({
+          lastAction: `${action}-layout-waiting`,
+          fromMode: mode === 'preview' ? 'edit' : 'preview',
+          toMode: mode,
+          attempt,
+          capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
+          targetTop: null,
+          actualTop: scroller.scrollTop
+        });
+        return false;
+      }
+
+      const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      let targetTop = modeScrollTopRef.current[mode];
+      if (pendingRestore) {
+        if (pendingRestore.line !== null) {
+          if (mode === 'edit') {
+            const view = editorViewRef.current;
+            if (view) {
+              const safeLine = clampValue(Math.round(pendingRestore.line), 1, view.state.doc.lines);
+              const line = view.state.doc.line(safeLine);
+              view.dispatch({
+                selection: { anchor: line.from },
+                scrollIntoView: false
+              });
+              const lineBlock = view.lineBlockAt(line.from);
+              targetTop = lineBlock.top - (scroller.clientHeight - lineBlock.height) / 2;
+            }
+          } else {
+            const targetBlock = blockForLine(pendingRestore.line, metrics);
+            if (targetBlock) {
+              const lineSpan = Math.max(targetBlock.endLine - targetBlock.startLine, 1);
+              const ratio = clampValue((pendingRestore.line - targetBlock.startLine) / lineSpan, 0, 1);
+              const targetCenter = targetBlock.top + (targetBlock.bottom - targetBlock.top) * ratio;
+              targetTop = targetCenter - scroller.clientHeight / 2;
+            }
+          }
+        } else {
+          targetTop = pendingRestore.progress * maxScrollTop;
+        }
+      }
+
+      scroller.scrollTop = clampValue(targetTop, 0, maxScrollTop);
+      modeScrollTopRef.current[mode] = scroller.scrollTop;
+      if (pendingRestore) pendingScrollRestoreRef.current = null;
+      syncScrollerMetrics(scroller);
+      setScrollDebugState({
+        lastAction: action,
+        fromMode: mode === 'preview' ? 'edit' : 'preview',
+        toMode: mode,
+        attempt,
+        capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
+        targetTop,
+        actualTop: scroller.scrollTop
+      });
+      return true;
+    },
+    [editorBlockMetrics, parsed, previewBlockMetrics, syncScrollerMetrics]
+  );
+
+  const toggleLeftMode = React.useCallback(() => {
+    const scroller = leftMode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
+    if (scroller) {
+      let rememberedLine: number | null = null;
+      if (leftMode === 'edit') {
+        const view = editorViewRef.current;
+        if (view) rememberedLine = view.state.doc.lineAt(view.state.selection.main.head).number;
+      } else {
+        const centerTop = scroller.scrollTop + scroller.clientHeight / 2;
+        rememberedLine = lineFromBlockMetric(centerTop, findBlockAtCenter(centerTop, previewBlockMetrics));
+      }
+      pendingScrollRestoreRef.current = {
+        line: rememberedLine,
+        progress: getScrollProgress(scroller)
+      };
+    }
+    captureModeScrollTop(leftMode);
+    setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'));
+  }, [captureModeScrollTop, getScrollProgress, leftMode, previewBlockMetrics]);
+
   const refreshWorkspace = React.useCallback(async (dirPath: string) => {
     setWorkspaceStatus('loading');
     setWorkspaceError(null);
@@ -198,31 +439,41 @@ export function EditView() {
     }
   }, []);
 
+  const adoptWorkspaceDir = React.useCallback(
+    async (dirPath: string) => {
+      await window.markflow.workspaceStateSet({ dirPath });
+      await refreshWorkspace(dirPath);
+    },
+    [refreshWorkspace]
+  );
+
   React.useEffect(() => {
     let cancelled = false;
-    void window.markflow
-      .workspaceStateGet()
-      .then((state) => {
-        if (cancelled || !state.dirPath) return;
-        return refreshWorkspace(state.dirPath);
-      })
-      .catch((error) => {
+    void (async () => {
+      try {
+        const state = await window.markflow.workspaceStateGet();
+        if (!cancelled && state.dirPath) await refreshWorkspace(state.dirPath);
+      } catch (error) {
         if (cancelled) return;
         setWorkspaceStatus('error');
         setWorkspaceError(error instanceof Error ? error.message : '恢复上次文件夹失败');
-      });
+      } finally {
+        if (!cancelled) setWorkspaceRestoreResolved(true);
+      }
+    })();
     return () => {
       cancelled = true;
     };
   }, [refreshWorkspace]);
 
   React.useEffect(() => {
-    if (!docPath) return;
+    if (!docPath || !workspaceRestoreResolved) return;
+    if (workspaceStatus === 'loading') return;
     if (workspaceDirPath && isPathInsideDir(docPath, workspaceDirPath)) return;
     const dirPath = getParentDirPath(docPath);
     if (!dirPath) return;
-    void refreshWorkspace(dirPath);
-  }, [docPath, refreshWorkspace, workspaceDirPath]);
+    void adoptWorkspaceDir(dirPath);
+  }, [adoptWorkspaceDir, docPath, workspaceDirPath, workspaceRestoreResolved, workspaceStatus]);
 
   const handleCheckUpdate = React.useCallback(async () => {
     setUpdateStatus('checking');
@@ -397,11 +648,7 @@ export function EditView() {
       if (!scroller || !content) return;
 
       let raf = 0;
-      const syncMetrics = () => {
-        setCurrentScrollTop(scroller.scrollTop);
-        setContentScrollHeight(scroller.scrollHeight);
-        setCurrentViewportHeight(scroller.clientHeight);
-      };
+      const syncMetrics = () => syncScrollerMetrics(scroller);
       const onScroll = () => {
         syncMetrics();
         revealScrollIndicator();
@@ -429,11 +676,7 @@ export function EditView() {
     const content = view.contentDOM;
 
       let raf = 0;
-      const syncMetrics = () => {
-        setCurrentScrollTop(scroller.scrollTop);
-        setContentScrollHeight(scroller.scrollHeight);
-        setCurrentViewportHeight(scroller.clientHeight);
-      };
+      const syncMetrics = () => syncScrollerMetrics(scroller);
       const onScroll = () => {
         syncMetrics();
         revealScrollIndicator();
@@ -453,7 +696,21 @@ export function EditView() {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
     };
-  }, [leftMode, parsed, markdown, contentZoomScale, revealScrollIndicator]);
+  }, [editorViewVersion, leftMode, parsed, markdown, contentZoomScale, revealScrollIndicator, syncScrollerMetrics]);
+
+  React.useEffect(() => {
+    let frame = 0;
+    let attempts = 0;
+
+    const restore = () => {
+      attempts += 1;
+      if (restoreModeScrollTop(leftMode, 'restore', attempts)) return;
+      if (attempts < 6) frame = requestAnimationFrame(restore);
+    };
+
+    frame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(frame);
+  }, [editorViewVersion, leftMode, restoreModeScrollTop]);
 
   React.useEffect(() => {
     if (leftMode !== 'edit') return;
@@ -486,7 +743,7 @@ export function EditView() {
     view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     return () => view.scrollDOM.removeEventListener('scroll', onScroll);
-  }, [leftMode, parsed, markdown, contentZoomScale]);
+  }, [editorViewVersion, leftMode, parsed, markdown, contentZoomScale]);
 
   const currentScroller = React.useCallback(() => {
     if (leftMode === 'preview') return previewScrollRef.current;
@@ -588,7 +845,7 @@ export function EditView() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
         e.preventDefault();
-        setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'));
+        toggleLeftMode();
         return;
       }
       if (e.key === 'F1') {
@@ -605,7 +862,7 @@ export function EditView() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [toggleLeftMode]);
 
   const dirty = markdown !== lastSavedMarkdown;
   const entryByPath = React.useMemo(() => new Map(workspaceEntries.map((entry) => [entry.path, entry])), [workspaceEntries]);
@@ -667,17 +924,11 @@ export function EditView() {
   }, [parsed, anchorTopById]);
 
   const notesWithTopForEditor = React.useMemo(() => {
-    const view = editorViewRef.current;
-    if (!view || !parsed) return [];
-    const anchorLineById = new Map<string, number>();
-    for (const anchor of parsed.anchors) anchorLineById.set(anchor.anchorId, anchor.sourceRange.startLine);
-
+    if (!parsed) return [];
+    const topByAnchorId = new Map(editorBlockMetrics.map((anchor) => [anchor.anchorId, anchor.top]));
     const groups = new Map<string, { top: number; notes: typeof parsed.notes }>();
     for (const note of parsed.notes) {
-      const line = anchorLineById.get(note.anchorId) ?? note.sourceRange.startLine;
-      const safeLine = Math.max(1, Math.min(line, view.state.doc.lines));
-      const pos = view.state.doc.line(safeLine).from;
-      const top = view.lineBlockAt(pos).top;
+      const top = topByAnchorId.get(note.anchorId) ?? 0;
       const existing = groups.get(note.anchorId);
       if (existing) {
         existing.notes.push(note);
@@ -688,7 +939,7 @@ export function EditView() {
     return Array.from(groups.entries())
       .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
       .sort((a, b) => a.top - b.top);
-  }, [parsed, markdown, contentZoomScale]);
+  }, [editorBlockMetrics, parsed]);
 
   const notesGroups = React.useMemo<NotesWindowGroup[]>(() => {
     const source = leftMode === 'preview' ? notesWithTop : notesWithTopForEditor;
@@ -737,6 +988,8 @@ export function EditView() {
   }, [downloadProgress, updateStatus, updateVersion]);
 
   const showScrollIndicator = contentScrollHeight > currentViewportHeight + 8;
+  const previewLiveScrollTop = previewScrollRef.current?.scrollTop ?? 0;
+  const editorLiveScrollTop = editorViewRef.current?.scrollDOM.scrollTop ?? 0;
   const scrollIndicatorMetrics = React.useMemo(() => {
     const scrollable = Math.max(contentScrollHeight, 1);
     const viewport = Math.max(1, currentViewportHeight);
@@ -752,6 +1005,11 @@ export function EditView() {
       setCollapsedDirPaths(new Set());
     }
   }, [workspaceDirPath]);
+
+  React.useEffect(() => {
+    if (leftMode === 'edit') return;
+    editorViewRef.current = null;
+  }, [leftMode]);
 
   React.useEffect(() => {
     if (!docPath) return;
@@ -804,7 +1062,7 @@ export function EditView() {
             <button
               className="btn"
               title="Toggle Edit / Preview (Ctrl/Cmd+E)"
-              onClick={() => setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'))}
+              onClick={toggleLeftMode}
             >
               {leftMode === 'edit' ? 'Preview' : 'Edit'}
             </button>
@@ -1001,6 +1259,7 @@ export function EditView() {
                   extensions={[mdLang()]}
                   onCreateEditor={(view: EditorView, _state: EditorState) => {
                     editorViewRef.current = view;
+                    setEditorViewVersion((version) => version + 1);
                     view.dom.style.height = '100%';
                     view.dom.style.display = 'flex';
                     view.dom.style.flexDirection = 'column';
@@ -1009,6 +1268,9 @@ export function EditView() {
                     view.scrollDOM.style.height = '100%';
                     view.scrollDOM.style.overflow = 'auto';
                     view.contentDOM.style.minHeight = '100%';
+                    void requestAnimationFrame(() => {
+                      restoreModeScrollTop('edit', 'create');
+                    });
                   }}
                   onChange={(value) => {
                     markdownRef.current = value;
@@ -1038,6 +1300,26 @@ export function EditView() {
         </div>
       </div>
 
+      {scrollDebugOpen ? (
+        <div className="subbar scrollDebugBar">
+          <div className="left scrollDebugPanel">
+            <span className="pill">Mode {leftMode}</span>
+            <span className="pill">Current {Math.round(currentScrollTop)}</span>
+            <span className="pill">Saved Preview {Math.round(modeScrollTopRef.current.preview)}</span>
+            <span className="pill">Saved Edit {Math.round(modeScrollTopRef.current.edit)}</span>
+            <span className="pill">Live Preview {Math.round(previewLiveScrollTop)}</span>
+            <span className="pill">Live Edit {Math.round(editorLiveScrollTop)}</span>
+            <span className="pill">Editor {editorViewRef.current ? 'ready' : 'pending'}</span>
+            <span className="pill">Preview {previewScrollRef.current ? 'ready' : 'pending'}</span>
+          </div>
+          <div className="right">
+            <span className="statusLine">
+              {`last=${scrollDebugState.lastAction} from=${scrollDebugState.fromMode ?? '-'} to=${scrollDebugState.toMode ?? '-'} attempt=${scrollDebugState.attempt} captured=${scrollDebugState.capturedTop ?? '-'} target=${scrollDebugState.targetTop ?? '-'} actual=${scrollDebugState.actualTop ?? '-'}`}
+            </span>
+          </div>
+        </div>
+      ) : null}
+
       <div className="subbar bottomBar">
         <div className="left">
           <span className="pill">
@@ -1047,6 +1329,13 @@ export function EditView() {
           {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
         </div>
         <div className="right">
+          <button
+            className={`btn ${scrollDebugOpen ? 'active' : ''}`}
+            title="Toggle scroll debug panel"
+            onClick={() => setScrollDebugOpen((open) => !open)}
+          >
+            Scroll Debug
+          </button>
           <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
           {updateStatus === 'downloading' ? <span className="pill">Downloading {Math.round(downloadProgress)}%</span> : null}
         </div>

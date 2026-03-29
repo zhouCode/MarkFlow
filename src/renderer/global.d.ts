@@ -56,6 +56,7 @@ declare global {
       folderOpen: () => Promise<{ dirPath: string } | null>;
       folderList: (args: { dirPath: string }) => Promise<{ dirPath: string; entries: FileBrowserEntry[] }>;
       workspaceStateGet: () => Promise<{ dirPath: string | null }>;
+      workspaceStateSet: (args: { dirPath: string | null }) => Promise<{ dirPath: string | null }>;
 
       contentZoomIn: () => void;
       contentZoomOut: () => void;

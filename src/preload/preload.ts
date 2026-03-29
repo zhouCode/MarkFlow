@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('markflow', {
   folderOpen: () => ipcRenderer.invoke('folder:open'),
   folderList: (args: { dirPath: string }) => ipcRenderer.invoke('folder:list', args),
   workspaceStateGet: () => ipcRenderer.invoke('workspace:state:get'),
+  workspaceStateSet: (args: { dirPath: string | null }) => ipcRenderer.invoke('workspace:state:set', args),
 
   contentZoomIn: () => ipcRenderer.send('contentZoom:adjust', 'in'),
   contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),

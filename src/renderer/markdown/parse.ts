@@ -214,15 +214,18 @@ function remarkNotesAndAnchors() {
       }
 
       if (isBlockNode(child) && child.type !== 'thematicBreak') {
+        const range = nodeLineRange(child);
         const anchorId = `a_${child.type}_${child.position?.start?.line ?? 1}_${nanoid(6)}`;
         child.data = child.data ?? {};
         child.data.hProperties = child.data.hProperties ?? {};
         child.data.hProperties['data-anchor'] = anchorId;
+        child.data.hProperties['data-source-start-line'] = String(range.startLine);
+        child.data.hProperties['data-source-end-line'] = String(range.endLine);
 
         anchors.push({
           anchorId,
           kind: child.type,
-          sourceRange: nodeLineRange(child)
+          sourceRange: range
         });
 
         if (pendingNotes.length > 0) {

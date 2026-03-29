@@ -876,6 +876,15 @@ body {
   color: var(--muted);
 }
 
+.scrollDebugBar {
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.scrollDebugPanel {
+  flex-wrap: wrap;
+}
+
 .scrollIndicator {
   position: absolute;
   top: 10px;

@@ -863,7 +863,6 @@ app.whenReady().then(async () => {
     if (!stats.isDirectory()) {
       throw new Error('Selected path is not a directory.');
     }
-    await setCurrentWorkspaceDirPath(dirPath);
     return {
       dirPath,
       entries: await listDirectoryTree(dirPath)
@@ -871,6 +870,22 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('workspace:state:get', async () => {
+    return { dirPath: currentWorkspaceDirPath };
+  });
+
+  ipcMain.handle('workspace:state:set', async (_evt, args: { dirPath: string | null }) => {
+    if (!args.dirPath) {
+      await setCurrentWorkspaceDirPath(null);
+      return { dirPath: currentWorkspaceDirPath };
+    }
+
+    const dirPath = path.resolve(args.dirPath);
+    const stats = await fs.stat(dirPath);
+    if (!stats.isDirectory()) {
+      throw new Error('Selected path is not a directory.');
+    }
+
+    await setCurrentWorkspaceDirPath(dirPath);
     return { dirPath: currentWorkspaceDirPath };
   });
 
