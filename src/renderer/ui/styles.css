@@ -710,6 +710,12 @@ body {
 
 .noteItem.abs {
   position: absolute;
+  transition:
+    left 140ms ease,
+    right 140ms ease,
+    box-shadow 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
 }
 
 .noteEntry + .noteEntry {
@@ -979,11 +985,15 @@ body {
 }
 
 .notesWindowCanvas .noteItem {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(10, 14, 18, 0.74);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
 }
 
 :root[data-theme="light"] .notesWindowCanvas .noteItem {
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 12px 24px rgba(15, 18, 22, 0.10);
 }
 
 .shareShell {
