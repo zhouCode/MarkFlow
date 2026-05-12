@@ -2,22 +2,20 @@ import React from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { markdown as mdLang } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { EditorView } from '@codemirror/view';
-import type { EditorState } from '@codemirror/state';
+import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import type { EditorState, Extension, Range } from '@codemirror/state';
+import {
+  openSearchPanel,
+  search,
+  searchKeymap,
+  setSearchQuery,
+  SearchQuery
+} from '@codemirror/search';
 import { useParsedDoc } from './useParsedDoc';
-import { renderInlineMarkdown } from '../markdown/parse';
+import { extractLeadingYamlFrontmatter, renderInlineMarkdown } from '../markdown/parse';
 import { useTheme } from './theme';
 
 type WorkspaceStatus = 'idle' | 'loading' | 'ready' | 'error';
-type ScrollDebugState = {
-  lastAction: string;
-  fromMode: 'preview' | 'edit' | null;
-  toMode: 'preview' | 'edit' | null;
-  attempt: number;
-  capturedTop: number | null;
-  targetTop: number | null;
-  actualTop: number | null;
-};
 type BlockMetric = {
   anchorId: string;
   startLine: number;
@@ -25,10 +23,319 @@ type BlockMetric = {
   top: number;
   bottom: number;
 };
-type PendingScrollRestore = {
-  line: number | null;
-  progress: number;
+
+
+const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
+
+type ToastMessage = {
+  kind: 'info' | 'error';
+  text: string;
 };
+
+function normalizeExternalHttpUrl(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function lineCount(value: string): number {
+  if (!value) return 0;
+  return value.replace(/\r?\n$/, '').split(/\r?\n/).length;
+}
+
+function leadingMetadataEndLine(markdown: string): number {
+  const frontmatter = extractLeadingYamlFrontmatter(markdown);
+  if (frontmatter.lineOffset === 0) return 0;
+  return lineCount(markdown.slice(0, markdown.length - frontmatter.content.length));
+}
+
+function selectedLines(state: EditorState): { from: number; to: number } {
+  let from = state.doc.lineAt(state.selection.main.from).number;
+  let to = state.doc.lineAt(state.selection.main.to).number;
+  if (to < from) [from, to] = [to, from];
+  return { from, to };
+}
+
+
+const CODE_KEYWORDS = new Set([
+  'abstract', 'as', 'async', 'await', 'bool', 'boolean', 'break', 'case', 'catch', 'class', 'const', 'constructor',
+  'continue', 'contract', 'def', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'external', 'false',
+  'final', 'finally', 'for', 'from', 'function', 'if', 'import', 'in', 'interface', 'internal', 'is', 'let', 'library',
+  'mapping', 'memory', 'modifier', 'new', 'null', 'override', 'private', 'public', 'pure', 'return', 'returns', 'self',
+  'static', 'storage', 'string', 'struct', 'super', 'switch', 'this', 'throw', 'true', 'try', 'type', 'uint', 'uint256',
+  'var', 'view', 'void', 'while', 'yield'
+]);
+
+function addCodeSyntaxDecorations(lineFrom: number, text: string, ranges: Range<Decoration>[]) {
+  const occupied: Array<{ from: number; to: number }> = [];
+  const addMark = (from: number, to: number, className: string, reserves = false) => {
+    if (to <= from) return;
+    ranges.push(Decoration.mark({ class: className }).range(lineFrom + from, lineFrom + to));
+    if (reserves) occupied.push({ from, to });
+  };
+  const isFree = (from: number, to: number) => !occupied.some((span) => from < span.to && to > span.from);
+
+  for (const match of text.matchAll(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)/g)) {
+    const from = match.index ?? 0;
+    addMark(from, from + match[0].length, 'mf-code-token-string', true);
+  }
+
+  for (const match of text.matchAll(/(\/\/.*|#.*|\/\*.*?\*\/)/g)) {
+    const from = match.index ?? 0;
+    if (isFree(from, from + match[0].length)) addMark(from, from + match[0].length, 'mf-code-token-comment', true);
+  }
+
+  for (const match of text.matchAll(/\b\d+(?:\.\d+)?\b/g)) {
+    const from = match.index ?? 0;
+    const to = from + match[0].length;
+    if (isFree(from, to)) addMark(from, to, 'mf-code-token-number');
+  }
+
+  for (const match of text.matchAll(/\b[A-Za-z_$][\w$]*\b/g)) {
+    const from = match.index ?? 0;
+    const word = match[0];
+    const to = from + word.length;
+    if (isFree(from, to) && CODE_KEYWORDS.has(word)) addMark(from, to, 'mf-code-token-keyword');
+  }
+
+  for (const match of text.matchAll(/\b([A-Za-z_$][\w$]*)(?=\s*\()/g)) {
+    const from = match.index ?? 0;
+    const to = from + match[1].length;
+    if (isFree(from, to) && !CODE_KEYWORDS.has(match[1])) addMark(from, to, 'mf-code-token-function');
+  }
+}
+
+
+function parseMarkdownImageDestination(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('<')) {
+    const end = trimmed.indexOf('>');
+    return end > 0 ? trimmed.slice(1, end).trim() : trimmed;
+  }
+
+  const quotedTitle = /\s+["'][^"']*["']\s*$/.exec(trimmed);
+  if (quotedTitle) return trimmed.slice(0, quotedTitle.index).trim();
+  return trimmed;
+}
+
+function findMarkdownImages(text: string): Array<{ from: number; to: number; alt: string; url: string }> {
+  return [...text.matchAll(/!\[([^\]\n]*)\]\(([^\n]+?)\)/g)]
+    .map((match) => ({
+      from: match.index ?? 0,
+      to: (match.index ?? 0) + match[0].length,
+      alt: match[1] ?? '',
+      url: parseMarkdownImageDestination(match[2] ?? '')
+    }))
+    .filter((image) => image.url.length > 0);
+}
+
+type EditorImagePreview = {
+  key: string;
+  line: number;
+  top: number;
+  rawUrl: string;
+  alt: string;
+};
+function markdownUnifiedDecorations(
+  view: EditorView,
+  metadataEndLine: number,
+  docPath: string | null,
+  imageHeightByLine: Map<number, number>
+): DecorationSet {
+  const ranges: Range<Decoration>[] = [];
+  const { from: selectedFromLine, to: selectedToLine } = selectedLines(view.state);
+  const activeLineNumber = view.state.doc.lineAt(view.state.selection.main.head).number;
+
+  const addLineClass = (lineNumber: number, className: string, attrs?: Record<string, string>) => {
+    const line = view.state.doc.line(lineNumber);
+    ranges.push(Decoration.line({ class: className, attributes: attrs }).range(line.from));
+  };
+
+  let inCodeFence = false;
+  let inNoteComment = false;
+
+  for (let lineNumber = 1; lineNumber <= view.state.doc.lines; lineNumber += 1) {
+    const line = view.state.doc.line(lineNumber);
+    const text = line.text;
+    const isActive = lineNumber >= selectedFromLine && lineNumber <= selectedToLine;
+    const nearActive = Math.abs(lineNumber - activeLineNumber) <= 1 || isActive;
+
+    if (!inCodeFence && (inNoteComment || /<!--\s*note(?::|\s)/i.test(text))) {
+      addLineClass(lineNumber, 'mf-note-source-line');
+      if (!/-->/i.test(text)) inNoteComment = true;
+      else inNoteComment = false;
+      continue;
+    }
+
+    if (inNoteComment) {
+      addLineClass(lineNumber, 'mf-note-source-line');
+      if (/-->/i.test(text)) inNoteComment = false;
+      continue;
+    }
+
+    if (metadataEndLine > 0 && lineNumber <= metadataEndLine) {
+      addLineClass(lineNumber, nearActive ? 'mf-frontmatter-line mf-markers-visible' : 'mf-frontmatter-line');
+      continue;
+    }
+
+    const fence = /^\s*(```+|~~~+)([^`~]*)$/.exec(text);
+    if (fence) {
+      addLineClass(lineNumber, nearActive ? 'mf-code-fence mf-code-block-line mf-markers-visible' : 'mf-code-fence mf-code-block-line');
+      const markerStart = line.from + (fence.index ?? 0);
+      const markerEnd = markerStart + fence[1].length;
+      const languageStart = markerEnd;
+      if (!nearActive) ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(markerStart, markerEnd));
+      if (line.to > languageStart) ranges.push(Decoration.mark({ class: 'mf-code-lang' }).range(languageStart, line.to));
+      inCodeFence = !inCodeFence;
+      continue;
+    }
+
+    if (inCodeFence) {
+      addLineClass(lineNumber, 'mf-code-block-line');
+      addCodeSyntaxDecorations(line.from, text, ranges);
+      continue;
+    }
+
+    const thematicBreak = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.exec(text);
+    if (thematicBreak) {
+      addLineClass(lineNumber, nearActive ? 'mf-hr-line mf-markers-visible' : 'mf-hr-line');
+      if (!nearActive) {
+        ranges.push(Decoration.mark({ class: 'mf-hr-marker' }).range(line.from, line.to));
+      }
+      continue;
+    }
+
+    if (nearActive) addLineClass(lineNumber, 'mf-markers-visible');
+
+    const unorderedList = /^(\s*)([-*+])(\s+)/.exec(text);
+    if (unorderedList) {
+      addLineClass(lineNumber, 'mf-list-line');
+      if (!nearActive) {
+        const markerStart = line.from + unorderedList[1].length;
+        ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(markerStart, markerStart + unorderedList[2].length + unorderedList[3].length));
+      }
+    }
+
+    const images = findMarkdownImages(text);
+    if (images.length > 0) {
+      const reservedHeight = imageHeightByLine.get(lineNumber) ?? 340;
+      addLineClass(lineNumber, 'mf-image-source-line', { style: `--image-reserved-height: ${reservedHeight}px` });
+      ranges.push(Decoration.mark({ class: 'mf-image-source-hidden' }).range(line.from, line.to));
+    }
+
+    const heading = /^(#{1,6})(\s+)/.exec(text);
+    if (heading) {
+      addLineClass(lineNumber, `mf-heading-line mf-h${heading[1].length}`);
+      if (!nearActive) {
+        ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(line.from, line.from + heading[1].length + heading[2].length));
+      }
+    }
+
+    if (nearActive) continue;
+
+    for (const match of text.matchAll(/(`+)([^`\n]+?)\1/g)) {
+      const start = line.from + (match.index ?? 0);
+      const markerLength = match[1].length;
+      const contentStart = start + markerLength;
+      const contentEnd = start + match[0].length - markerLength;
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start, start + markerLength));
+      ranges.push(Decoration.mark({ class: 'mf-inline-code' }).range(contentStart, contentEnd));
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start + match[0].length - markerLength, start + match[0].length));
+    }
+
+    for (const match of text.matchAll(/(\*\*|__)([^*_\n]+?)\1/g)) {
+      const start = line.from + (match.index ?? 0);
+      const markerLength = match[1].length;
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start, start + markerLength));
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start + match[0].length - markerLength, start + match[0].length));
+    }
+
+    for (const match of text.matchAll(/(?<!\*)\*([^*\n]+?)\*(?!\*)|_([^_\n]+?)_/g)) {
+      const start = line.from + (match.index ?? 0);
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start, start + 1));
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start + match[0].length - 1, start + match[0].length));
+    }
+
+    for (const match of text.matchAll(/(!?\[)([^\]\n]+)(\]\()([^\)\n]+)(\))/g)) {
+      const start = line.from + (match.index ?? 0);
+      const openLength = match[1].length;
+      const labelLength = match[2].length;
+      const midLength = match[3].length;
+      const urlLength = match[4].length;
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start, start + openLength));
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start + openLength + labelLength, start + openLength + labelLength + midLength));
+      ranges.push(Decoration.mark({ class: 'mf-link-target' }).range(start + openLength + labelLength + midLength, start + openLength + labelLength + midLength + urlLength));
+      ranges.push(Decoration.mark({ class: 'mf-md-marker' }).range(start + match[0].length - 1, start + match[0].length));
+    }
+  }
+
+  return Decoration.set(ranges, true);
+}
+
+function unifiedMarkdownExtension(docPath: string | null, imageHeightByLine: Map<number, number>): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = markdownUnifiedDecorations(view, leadingMetadataEndLine(view.state.doc.toString()), docPath, imageHeightByLine);
+      }
+
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+          this.decorations = markdownUnifiedDecorations(update.view, leadingMetadataEndLine(update.view.state.doc.toString()), docPath, imageHeightByLine);
+        }
+      }
+    },
+    {
+      decorations: (plugin) => plugin.decorations
+    }
+  );
+}
+
+function findMarkdownLinkAt(text: string, offset: number): string | null {
+  for (const match of text.matchAll(/!?\[[^\]\n]+\]\(([^\)\n]+)\)/g)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (offset < start || offset > end) continue;
+    const url = match[1]?.trim() ?? '';
+    return normalizeExternalHttpUrl(url);
+  }
+  return null;
+}
+
+function findBareUrlAt(text: string, offset: number): string | null {
+  for (const match of text.matchAll(/https?:\/\/[^\s<>)]+/g)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (offset >= start && offset <= end) return normalizeExternalHttpUrl(match[0]);
+  }
+  return null;
+}
+
+function externalLinkClickExtension(openUrl: (url: string) => void): Extension {
+  return EditorView.domEventHandlers({
+    click(event, view) {
+      if (!(event.metaKey || event.ctrlKey)) return false;
+      const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (position == null) return false;
+      const line = view.state.doc.lineAt(position);
+      const offset = position - line.from;
+      const url = findMarkdownLinkAt(line.text, offset) ?? findBareUrlAt(line.text, offset);
+      if (!url) return false;
+      event.preventDefault();
+      openUrl(url);
+      return true;
+    }
+  });
+}
 
 function getParentDirPath(filePath: string): string | null {
   const normalized = filePath.replace(/[\\/]+$/, '');
@@ -54,41 +361,6 @@ function isPathInsideDir(filePath: string, dirPath: string): boolean {
   return normalizedFile.startsWith(`${normalizedDir}${separator}`);
 }
 
-function clampValue(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function findBlockAtCenter(centerTop: number, metrics: BlockMetric[]): BlockMetric | null {
-  if (metrics.length === 0) return null;
-  let fallback = metrics[0]!;
-  for (const metric of metrics) {
-    if (centerTop >= metric.top && centerTop <= metric.bottom) return metric;
-    if (metric.top <= centerTop) fallback = metric;
-    else break;
-  }
-  return fallback;
-}
-
-function lineFromBlockMetric(centerTop: number, block: BlockMetric | null): number | null {
-  if (!block) return null;
-  const blockHeight = Math.max(block.bottom - block.top, 1);
-  const ratio = clampValue((centerTop - block.top) / blockHeight, 0, 1);
-  const lineSpan = Math.max(block.endLine - block.startLine, 0);
-  return block.startLine + ratio * lineSpan;
-}
-
-function blockForLine(line: number, metrics: BlockMetric[]): BlockMetric | null {
-  if (metrics.length === 0) return null;
-  for (const metric of metrics) {
-    if (line >= metric.startLine && line <= metric.endLine) return metric;
-  }
-  let fallback = metrics[0]!;
-  for (const metric of metrics) {
-    if (metric.startLine <= line) fallback = metric;
-    else break;
-  }
-  return fallback;
-}
 
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
@@ -100,21 +372,10 @@ export function EditView() {
   const [workspaceStatus, setWorkspaceStatus] = React.useState<WorkspaceStatus>('idle');
   const [workspaceError, setWorkspaceError] = React.useState<string | null>(null);
   const [workspaceRestoreResolved, setWorkspaceRestoreResolved] = React.useState(false);
-  const [scrollDebugOpen, setScrollDebugOpen] = React.useState(false);
-  const [scrollDebugState, setScrollDebugState] = React.useState<ScrollDebugState>({
-    lastAction: 'idle',
-    fromMode: null,
-    toMode: null,
-    attempt: 0,
-    capturedTop: null,
-    targetTop: null,
-    actualTop: null
-  });
   const [sidebarOpen, setSidebarOpen] = React.useState(true);
   const [editorViewVersion, setEditorViewVersion] = React.useState(0);
   const [collapsedDirPaths, setCollapsedDirPaths] = React.useState<Set<string>>(() => new Set());
   const { parsed } = useParsedDoc(markdown, docPath);
-  const [leftMode, setLeftMode] = React.useState<'preview' | 'edit'>('preview');
   const [notesWindowOpen, setNotesWindowOpen] = React.useState(false);
   const [notesSettings, setNotesSettings] = React.useState<NotesWindowSettings>({
     syncZoomWithEdit: true,
@@ -127,22 +388,24 @@ export function EditView() {
   const [downloadProgress, setDownloadProgress] = React.useState(0);
   const [appInfo, setAppInfo] = React.useState<AppInfo | null>(null);
   const [aboutOpen, setAboutOpen] = React.useState(false);
+  const [quickOpenUrl, setQuickOpenUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
+  const [quickOpenDraftUrl, setQuickOpenDraftUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
+  const [toast, setToast] = React.useState<ToastMessage | null>(null);
+  const [imageUrlByKey, setImageUrlByKey] = React.useState<Record<string, ImageResolveResult>>({});
+  const [imageWidthByKey, setImageWidthByKey] = React.useState<Record<string, number>>({});
+  const [imageNaturalSizeByKey, setImageNaturalSizeByKey] = React.useState<Record<string, { width: number; height: number }>>({});
   const [activeAnchor, setActiveAnchor] = React.useState<string | null>(null);
-  const [anchorTopById, setAnchorTopById] = React.useState<Record<string, number>>({});
   const [contentScrollHeight, setContentScrollHeight] = React.useState(1);
   const [currentScrollTop, setCurrentScrollTop] = React.useState(0);
   const [currentViewportHeight, setCurrentViewportHeight] = React.useState(1);
   const [scrollIndicatorVisible, setScrollIndicatorVisible] = React.useState(false);
-  const previewScrollRef = React.useRef<HTMLDivElement | null>(null);
-  const previewRef = React.useRef<HTMLDivElement | null>(null);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
   const docPathRef = React.useRef<string | null>(docPath);
   const notesWindowOpenRef = React.useRef(notesWindowOpen);
   const handleOpenFileRef = React.useRef<() => Promise<void>>(async () => {});
   const scrollIndicatorTimerRef = React.useRef<number | null>(null);
-  const modeScrollTopRef = React.useRef<{ preview: number; edit: number }>({ preview: 0, edit: 0 });
-  const pendingScrollRestoreRef = React.useRef<PendingScrollRestore | null>(null);
+  const toastTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     markdownRef.current = markdown;
@@ -158,8 +421,6 @@ export function EditView() {
 
   React.useEffect(() => {
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
-      modeScrollTopRef.current = { preview: 0, edit: 0 };
-      pendingScrollRestoreRef.current = null;
       setDocPath(payload.docPath);
       setMarkdown(payload.markdown);
       setLastSavedMarkdown(payload.markdown);
@@ -219,6 +480,26 @@ export function EditView() {
     };
   }, []);
 
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void window.markflow
+      .quickOpenGet()
+      .then((state) => {
+        if (cancelled) return;
+        setQuickOpenUrl(state.url);
+        setQuickOpenDraftUrl(state.url);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setQuickOpenUrl(DEFAULT_QUICK_OPEN_URL);
+        setQuickOpenDraftUrl(DEFAULT_QUICK_OPEN_URL);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const updateNotesSettings = React.useCallback(async (input: Partial<NotesWindowSettings>) => {
     try {
       const nextSettings = await window.markflow.notesSettingsSet(input);
@@ -227,6 +508,76 @@ export function EditView() {
       alert(error instanceof Error ? error.message : '更新 Notes 设置失败');
     }
   }, []);
+
+
+  const showToast = React.useCallback((message: ToastMessage) => {
+    setToast(message);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 2800);
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    },
+    []
+  );
+
+  const openExternalUrl = React.useCallback(
+    async (url: string) => {
+      const normalized = normalizeExternalHttpUrl(url);
+      if (!normalized) {
+        showToast({ kind: 'error', text: 'Only http/https URLs can be opened externally.' });
+        return false;
+      }
+      const result = await window.markflow.openExternal({ url: normalized });
+      if (!result.success) {
+        showToast({ kind: 'error', text: result.message ?? 'Unable to open URL.' });
+        return false;
+      }
+      return true;
+    },
+    [showToast]
+  );
+
+  const handleQuickOpen = React.useCallback(async () => {
+    const opened = await openExternalUrl(quickOpenUrl);
+    if (opened) showToast({ kind: 'info', text: `Opened page ${quickOpenUrl}` });
+  }, [openExternalUrl, quickOpenUrl, showToast]);
+
+  const handleQuickOpenSave = React.useCallback(async () => {
+    const normalized = normalizeExternalHttpUrl(quickOpenDraftUrl);
+    if (!normalized) {
+      showToast({ kind: 'error', text: 'Enter a valid http or https URL.' });
+      setQuickOpenDraftUrl(quickOpenUrl);
+      return;
+    }
+    try {
+      const saved = await window.markflow.quickOpenSet({ url: normalized });
+      setQuickOpenUrl(saved.url);
+      setQuickOpenDraftUrl(saved.url);
+      showToast({ kind: 'info', text: 'Quick-open URL saved.' });
+    } catch (error) {
+      showToast({ kind: 'error', text: error instanceof Error ? error.message : 'Unable to save quick-open URL.' });
+      setQuickOpenDraftUrl(quickOpenUrl);
+    }
+  }, [quickOpenDraftUrl, quickOpenUrl, showToast]);
+
+  const handleExportPdf = React.useCallback(async () => {
+    const result = await window.markflow.exportPdf({ markdown, docPath });
+    if (result.success) {
+      showToast({ kind: 'info', text: `PDF exported to ${result.filePath}` });
+      return;
+    }
+    if (result.canceled) {
+      showToast({ kind: 'info', text: 'PDF export canceled.' });
+      return;
+    }
+    showToast({ kind: 'error', text: result.message ?? 'PDF export failed.' });
+  }, [docPath, markdown, showToast]);
 
   const revealScrollIndicator = React.useCallback(() => {
     setScrollIndicatorVisible(true);
@@ -250,31 +601,52 @@ export function EditView() {
     setCurrentViewportHeight(scroller.clientHeight);
   }, []);
 
-  const getScrollProgress = React.useCallback((scroller: HTMLElement) => {
-    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    if (max === 0) return 0;
-    return Math.max(0, Math.min(1, scroller.scrollTop / max));
-  }, []);
+  const editorImagePreviews = React.useMemo<EditorImagePreview[]>(() => {
+    const view = editorViewRef.current;
+    if (!view) return [];
+    const previews: EditorImagePreview[] = [];
+    const doc = view.state.doc;
 
-  const previewBlockMetrics = React.useMemo<BlockMetric[]>(() => {
-    if (!parsed) return [];
-    const root = previewRef.current;
-    if (!root) return [];
-    return parsed.anchors
-      .map((anchor) => {
-        const element = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchor.anchorId)}"]`);
-        if (!element) return null;
-        return {
-          anchorId: anchor.anchorId,
-          startLine: anchor.sourceRange.startLine,
-          endLine: anchor.sourceRange.endLine,
-          top: element.offsetTop,
-          bottom: element.offsetTop + element.offsetHeight
-        };
-      })
-      .filter((metric): metric is BlockMetric => Boolean(metric))
-      .sort((a, b) => a.top - b.top);
-  }, [anchorTopById, parsed]);
+    for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber += 1) {
+      const line = doc.line(lineNumber);
+      const images = findMarkdownImages(line.text);
+      if (images.length === 0) continue;
+      const block = view.lineBlockAt(line.to);
+      images.forEach((image, index) => {
+        previews.push({
+          key: `${lineNumber}:${index}:${image.url}`,
+          line: lineNumber,
+          top: block.top + 10 + index * 8,
+          rawUrl: image.url,
+          alt: image.alt
+        });
+      });
+    }
+
+    return previews;
+  }, [editorViewVersion, markdown, contentZoomScale, currentScrollTop, currentViewportHeight]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const missing = editorImagePreviews.filter((image) => !imageUrlByKey[image.key]);
+    if (missing.length === 0) return;
+
+    void Promise.all(missing.map(async (image) => {
+      const result = await window.markflow.resolveImageUrl({ url: image.rawUrl, docPath });
+      return [image.key, result] as const;
+    })).then((entries) => {
+      if (cancelled) return;
+      setImageUrlByKey((prev) => {
+        const next = { ...prev };
+        for (const [key, result] of entries) next[key] = result;
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [docPath, editorImagePreviews, imageUrlByKey]);
 
   const editorBlockMetrics = React.useMemo<BlockMetric[]>(() => {
     const view = editorViewRef.current;
@@ -297,121 +669,6 @@ export function EditView() {
       })
       .sort((a, b) => a.top - b.top);
   }, [editorViewVersion, parsed, markdown, contentZoomScale]);
-
-  const captureModeScrollTop = React.useCallback((mode: 'preview' | 'edit') => {
-    const scroller = mode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
-    if (!scroller) return;
-    const capturedTop = scroller.scrollTop;
-    modeScrollTopRef.current[mode] = capturedTop;
-    setScrollDebugState({
-      lastAction: 'capture',
-      fromMode: mode,
-      toMode: mode === 'preview' ? 'edit' : 'preview',
-      attempt: 0,
-      capturedTop,
-      targetTop: modeScrollTopRef.current[mode],
-      actualTop: capturedTop
-    });
-  }, []);
-
-  const restoreModeScrollTop = React.useCallback(
-    (mode: 'preview' | 'edit', action: 'restore' | 'create' = 'restore', attempt = 1) => {
-      const scroller = mode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
-      if (!scroller) {
-        setScrollDebugState({
-          lastAction: `${action}-waiting`,
-          fromMode: mode === 'preview' ? 'edit' : 'preview',
-          toMode: mode,
-          attempt,
-          capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
-          targetTop: modeScrollTopRef.current[mode],
-          actualTop: null
-        });
-        return false;
-      }
-
-      const metrics = mode === 'preview' ? previewBlockMetrics : editorBlockMetrics;
-      const pendingRestore = pendingScrollRestoreRef.current;
-      if (pendingRestore && parsed && parsed.anchors.length > 0 && metrics.length === 0) {
-        setScrollDebugState({
-          lastAction: `${action}-layout-waiting`,
-          fromMode: mode === 'preview' ? 'edit' : 'preview',
-          toMode: mode,
-          attempt,
-          capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
-          targetTop: null,
-          actualTop: scroller.scrollTop
-        });
-        return false;
-      }
-
-      const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-      let targetTop = modeScrollTopRef.current[mode];
-      if (pendingRestore) {
-        if (pendingRestore.line !== null) {
-          if (mode === 'edit') {
-            const view = editorViewRef.current;
-            if (view) {
-              const safeLine = clampValue(Math.round(pendingRestore.line), 1, view.state.doc.lines);
-              const line = view.state.doc.line(safeLine);
-              view.dispatch({
-                selection: { anchor: line.from },
-                scrollIntoView: false
-              });
-              const lineBlock = view.lineBlockAt(line.from);
-              targetTop = lineBlock.top - (scroller.clientHeight - lineBlock.height) / 2;
-            }
-          } else {
-            const targetBlock = blockForLine(pendingRestore.line, metrics);
-            if (targetBlock) {
-              const lineSpan = Math.max(targetBlock.endLine - targetBlock.startLine, 1);
-              const ratio = clampValue((pendingRestore.line - targetBlock.startLine) / lineSpan, 0, 1);
-              const targetCenter = targetBlock.top + (targetBlock.bottom - targetBlock.top) * ratio;
-              targetTop = targetCenter - scroller.clientHeight / 2;
-            }
-          }
-        } else {
-          targetTop = pendingRestore.progress * maxScrollTop;
-        }
-      }
-
-      scroller.scrollTop = clampValue(targetTop, 0, maxScrollTop);
-      modeScrollTopRef.current[mode] = scroller.scrollTop;
-      if (pendingRestore) pendingScrollRestoreRef.current = null;
-      syncScrollerMetrics(scroller);
-      setScrollDebugState({
-        lastAction: action,
-        fromMode: mode === 'preview' ? 'edit' : 'preview',
-        toMode: mode,
-        attempt,
-        capturedTop: modeScrollTopRef.current[mode === 'preview' ? 'edit' : 'preview'],
-        targetTop,
-        actualTop: scroller.scrollTop
-      });
-      return true;
-    },
-    [editorBlockMetrics, parsed, previewBlockMetrics, syncScrollerMetrics]
-  );
-
-  const toggleLeftMode = React.useCallback(() => {
-    const scroller = leftMode === 'preview' ? previewScrollRef.current : editorViewRef.current?.scrollDOM ?? null;
-    if (scroller) {
-      let rememberedLine: number | null = null;
-      if (leftMode === 'edit') {
-        const view = editorViewRef.current;
-        if (view) rememberedLine = view.state.doc.lineAt(view.state.selection.main.head).number;
-      } else {
-        const centerTop = scroller.scrollTop + scroller.clientHeight / 2;
-        rememberedLine = lineFromBlockMetric(centerTop, findBlockAtCenter(centerTop, previewBlockMetrics));
-      }
-      pendingScrollRestoreRef.current = {
-        line: rememberedLine,
-        progress: getScrollProgress(scroller)
-      };
-    }
-    captureModeScrollTop(leftMode);
-    setLeftMode((mode) => (mode === 'edit' ? 'preview' : 'edit'));
-  }, [captureModeScrollTop, getScrollProgress, leftMode, previewBlockMetrics]);
 
   const refreshWorkspace = React.useCallback(async (dirPath: string) => {
     setWorkspaceStatus('loading');
@@ -582,108 +839,20 @@ export function EditView() {
   }, [parsed]);
 
   React.useEffect(() => {
-    if (leftMode !== 'preview') return;
-    const scroller = previewScrollRef.current;
-    const content = previewRef.current;
-    if (!scroller || !content) return;
-    const anchors = Array.from(content.querySelectorAll<HTMLElement>('[data-anchor]'));
-    if (anchors.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort((a, b) => (a.boundingClientRect.top ?? 0) - (b.boundingClientRect.top ?? 0));
-        const top = visible[0]?.target as HTMLElement | undefined;
-        if (top) {
-          setActiveAnchor(top.dataset.anchor ?? null);
-        }
-      },
-      { root: scroller, threshold: 0.2 }
-    );
-    for (const anchor of anchors) observer.observe(anchor);
-    return () => observer.disconnect();
-  }, [parsed, leftMode, contentZoomScale]);
-
-  React.useEffect(() => {
-    if (!parsed || leftMode !== 'preview') return;
-    const scroller = previewScrollRef.current;
-    const content = previewRef.current;
-    if (!scroller || !content) return;
-
-    let raf = 0;
-    const measure = () => {
-      const nextScroller = previewScrollRef.current;
-      const nextContent = previewRef.current;
-      if (!nextScroller || !nextContent) return;
-      const nextTopById: Record<string, number> = {};
-      const scrollerRect = nextScroller.getBoundingClientRect();
-      const anchors = Array.from(nextContent.querySelectorAll<HTMLElement>('[data-anchor]'));
-      for (const anchor of anchors) {
-        const anchorId = anchor.dataset.anchor;
-        if (!anchorId) continue;
-        const rect = anchor.getBoundingClientRect();
-        nextTopById[anchorId] = rect.top - scrollerRect.top + nextScroller.scrollTop;
-      }
-      setAnchorTopById(nextTopById);
-    };
-
-    const resizeObserver = new ResizeObserver(() => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(measure);
-    });
-    resizeObserver.observe(scroller);
-    resizeObserver.observe(content);
-    raf = requestAnimationFrame(measure);
-
-    return () => {
-      cancelAnimationFrame(raf);
-      resizeObserver.disconnect();
-    };
-  }, [parsed, leftMode, contentZoomScale]);
-
-  React.useEffect(() => {
-    if (leftMode === 'preview') {
-      const scroller = previewScrollRef.current;
-      const content = previewRef.current;
-      if (!scroller || !content) return;
-
-      let raf = 0;
-      const syncMetrics = () => syncScrollerMetrics(scroller);
-      const onScroll = () => {
-        syncMetrics();
-        revealScrollIndicator();
-      };
-      const resizeObserver = new ResizeObserver(() => {
-        cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(syncMetrics);
-      });
-
-      scroller.addEventListener('scroll', onScroll, { passive: true });
-      resizeObserver.observe(scroller);
-      resizeObserver.observe(content);
-      syncMetrics();
-
-      return () => {
-        scroller.removeEventListener('scroll', onScroll);
-        cancelAnimationFrame(raf);
-        resizeObserver.disconnect();
-      };
-    }
-
     const view = editorViewRef.current;
     if (!view) return;
     const scroller = view.scrollDOM;
     const content = view.contentDOM;
 
-      let raf = 0;
-      const syncMetrics = () => syncScrollerMetrics(scroller);
-      const onScroll = () => {
-        syncMetrics();
-        revealScrollIndicator();
-      };
-      const resizeObserver = new ResizeObserver(() => {
-        cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(syncMetrics);
+    let raf = 0;
+    const syncMetrics = () => syncScrollerMetrics(scroller);
+    const onScroll = () => {
+      syncMetrics();
+      revealScrollIndicator();
+    };
+    const resizeObserver = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(syncMetrics);
     });
 
     scroller.addEventListener('scroll', onScroll, { passive: true });
@@ -696,24 +865,9 @@ export function EditView() {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
     };
-  }, [editorViewVersion, leftMode, parsed, markdown, contentZoomScale, revealScrollIndicator, syncScrollerMetrics]);
+  }, [editorViewVersion, parsed, markdown, contentZoomScale, revealScrollIndicator, syncScrollerMetrics]);
 
   React.useEffect(() => {
-    let frame = 0;
-    let attempts = 0;
-
-    const restore = () => {
-      attempts += 1;
-      if (restoreModeScrollTop(leftMode, 'restore', attempts)) return;
-      if (attempts < 6) frame = requestAnimationFrame(restore);
-    };
-
-    frame = requestAnimationFrame(restore);
-    return () => cancelAnimationFrame(frame);
-  }, [editorViewVersion, leftMode, restoreModeScrollTop]);
-
-  React.useEffect(() => {
-    if (leftMode !== 'edit') return;
     const view = editorViewRef.current;
     if (!view || !parsed) return;
 
@@ -743,12 +897,9 @@ export function EditView() {
     view.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
     return () => view.scrollDOM.removeEventListener('scroll', onScroll);
-  }, [editorViewVersion, leftMode, parsed, markdown, contentZoomScale]);
+  }, [editorViewVersion, parsed, markdown, contentZoomScale]);
 
-  const currentScroller = React.useCallback(() => {
-    if (leftMode === 'preview') return previewScrollRef.current;
-    return editorViewRef.current?.scrollDOM ?? null;
-  }, [leftMode]);
+  const currentScroller = React.useCallback(() => editorViewRef.current?.scrollDOM ?? null, []);
 
   const scrollToProgress = React.useCallback(
     (progress: number) => {
@@ -763,16 +914,6 @@ export function EditView() {
   const scrollToAnchor = React.useCallback(
     (anchorId: string) => {
       if (!parsed) return;
-      if (leftMode === 'preview') {
-        const root = previewRef.current;
-        const scroller = previewScrollRef.current;
-        if (!root || !scroller) return;
-        const target = root.querySelector<HTMLElement>(`[data-anchor="${CSS.escape(anchorId)}"]`);
-        if (!target) return;
-        scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
-        return;
-      }
-
       const view = editorViewRef.current;
       if (!view) return;
       const anchor = parsed.anchors.find((item) => item.anchorId === anchorId);
@@ -782,7 +923,7 @@ export function EditView() {
       const block = view.lineBlockAt(pos);
       view.scrollDOM.scrollTo({ top: block.top, behavior: 'smooth' });
     },
-    [leftMode, parsed]
+    [parsed]
   );
 
   React.useEffect(() => {
@@ -843,11 +984,6 @@ export function EditView() {
         setSidebarOpen((open) => !open);
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
-        e.preventDefault();
-        toggleLeftMode();
-        return;
-      }
       if (e.key === 'F1') {
         e.preventDefault();
         setAboutOpen((open) => !open);
@@ -862,7 +998,7 @@ export function EditView() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [toggleLeftMode]);
+  }, []);
 
   const dirty = markdown !== lastSavedMarkdown;
   const entryByPath = React.useMemo(() => new Map(workspaceEntries.map((entry) => [entry.path, entry])), [workspaceEntries]);
@@ -898,30 +1034,13 @@ export function EditView() {
       EditorView.theme(
         {
           '&': { backgroundColor: 'rgba(255,255,255,0.70)', color: '#0b1220' },
-          '.cm-content': { fontFamily: 'var(--mono)' },
+          '.cm-content': { fontFamily: 'inherit', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' },
           '.cm-gutters': { backgroundColor: 'rgba(255,255,255,0.60)', color: '#556070', border: 'none' }
         },
         { dark: false }
       ),
     []
   );
-
-  const notesWithTop = React.useMemo(() => {
-    const list = parsed?.notes ?? [];
-    const groups = new Map<string, { top: number; notes: typeof list }>();
-    for (const note of list) {
-      const top = anchorTopById[note.anchorId] ?? 0;
-      const existing = groups.get(note.anchorId);
-      if (existing) {
-        existing.notes.push(note);
-      } else {
-        groups.set(note.anchorId, { top, notes: [note] });
-      }
-    }
-    return Array.from(groups.entries())
-      .map(([anchorId, group]) => ({ anchorId, top: group.top, notes: group.notes }))
-      .sort((a, b) => a.top - b.top);
-  }, [parsed, anchorTopById]);
 
   const notesWithTopForEditor = React.useMemo(() => {
     if (!parsed) return [];
@@ -942,7 +1061,7 @@ export function EditView() {
   }, [editorBlockMetrics, parsed]);
 
   const notesGroups = React.useMemo<NotesWindowGroup[]>(() => {
-    const source = leftMode === 'preview' ? notesWithTop : notesWithTopForEditor;
+    const source = notesWithTopForEditor;
     return source.map((group) => ({
       anchorId: group.anchorId,
       top: group.top,
@@ -952,18 +1071,18 @@ export function EditView() {
         html: noteHtmlById[note.id] ?? ''
       }))
     }));
-  }, [leftMode, noteHtmlById, notesWithTop, notesWithTopForEditor]);
+  }, [noteHtmlById, notesWithTopForEditor]);
 
   React.useEffect(() => {
     window.markflow.notesUpdate({
-      mode: leftMode,
+      mode: 'edit',
       activeAnchor,
       groups: notesGroups,
       scrollHeight: Math.max(contentScrollHeight, 1),
       scrollTop: currentScrollTop,
       zoomScale: contentZoomScale
     });
-  }, [leftMode, activeAnchor, notesGroups, contentScrollHeight, currentScrollTop, contentZoomScale]);
+  }, [activeAnchor, notesGroups, contentScrollHeight, currentScrollTop, contentZoomScale]);
 
   const handleUpdateAction = React.useCallback(() => {
     if (updateStatus === 'available') {
@@ -987,9 +1106,42 @@ export function EditView() {
     return 'Update';
   }, [downloadProgress, updateStatus, updateVersion]);
 
+  const imageRenderedHeight = React.useCallback((key: string) => {
+    const width = imageWidthByKey[key] ?? 720;
+    const natural = imageNaturalSizeByKey[key];
+    if (!natural || natural.width <= 0 || natural.height <= 0) return 300;
+    return Math.max(40, Math.round((width / natural.width) * natural.height));
+  }, [imageNaturalSizeByKey, imageWidthByKey]);
+
+  const imageReservedHeight = React.useCallback((key: string) => imageRenderedHeight(key) + 44, [imageRenderedHeight]);
+
+  const imageHeightByLine = React.useMemo(() => {
+    const heights = new Map<number, number>();
+    for (const image of editorImagePreviews) {
+      const current = heights.get(image.line) ?? 0;
+      heights.set(image.line, Math.max(current, imageReservedHeight(image.key)));
+    }
+    return heights;
+  }, [editorImagePreviews, imageReservedHeight]);
+
+  const beginImageResize = React.useCallback((event: React.PointerEvent, key: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = imageWidthByKey[key] ?? 720;
+    const onMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.max(120, Math.min(4000, startWidth + moveEvent.clientX - startX));
+      setImageWidthByKey((prev) => ({ ...prev, [key]: nextWidth }));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  }, [imageWidthByKey]);
+
   const showScrollIndicator = contentScrollHeight > currentViewportHeight + 8;
-  const previewLiveScrollTop = previewScrollRef.current?.scrollTop ?? 0;
-  const editorLiveScrollTop = editorViewRef.current?.scrollDOM.scrollTop ?? 0;
   const scrollIndicatorMetrics = React.useMemo(() => {
     const scrollable = Math.max(contentScrollHeight, 1);
     const viewport = Math.max(1, currentViewportHeight);
@@ -1005,11 +1157,6 @@ export function EditView() {
       setCollapsedDirPaths(new Set());
     }
   }, [workspaceDirPath]);
-
-  React.useEffect(() => {
-    if (leftMode === 'edit') return;
-    editorViewRef.current = null;
-  }, [leftMode]);
 
   React.useEffect(() => {
     if (!docPath) return;
@@ -1059,12 +1206,31 @@ export function EditView() {
             >
               Files
             </button>
-            <button
-              className="btn"
-              title="Toggle Edit / Preview (Ctrl/Cmd+E)"
-              onClick={toggleLeftMode}
-            >
-              {leftMode === 'edit' ? 'Preview' : 'Edit'}
+          </div>
+          <div className="toolbarGroup searchToolbar" aria-label="Search and replace">
+            <button className="btn" title="Find / Replace (Ctrl/Cmd+F)" onClick={() => editorViewRef.current && openSearchPanel(editorViewRef.current)}>
+              Find / Replace
+            </button>
+          </div>
+          <div className="toolbarGroup quickOpenToolbar" aria-label="Quick-open website">
+            <button className="btn btnPrimary" title="Open configured page" onClick={() => void handleQuickOpen()}>
+              Open Page
+            </button>
+            <input
+              className="quickOpenInput"
+              value={quickOpenDraftUrl}
+              aria-label="Quick-open URL"
+              onChange={(event) => setQuickOpenDraftUrl(event.target.value)}
+              onBlur={() => void handleQuickOpenSave()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void handleQuickOpenSave();
+                if (event.key === 'Escape') setQuickOpenDraftUrl(quickOpenUrl);
+              }}
+            />
+          </div>
+          <div className="toolbarGroup">
+            <button className="btn" title="Export current document to PDF" onClick={() => void handleExportPdf()}>
+              Export PDF
             </button>
           </div>
         </div>
@@ -1154,7 +1320,7 @@ export function EditView() {
                   className="aboutLink"
                   onClick={() => {
                     if (!appInfo?.repositoryUrl) return;
-                    void window.markflow.openExternal({ url: appInfo.repositoryUrl });
+                    void openExternalUrl(appInfo.repositoryUrl);
                   }}
                 >
                   {appInfo?.repositoryUrl ?? 'Loading...'}
@@ -1247,44 +1413,107 @@ export function EditView() {
             </aside>
           ) : null}
           <div className="card zoomCard">
-            {leftMode === 'preview' ? (
-              <div ref={previewScrollRef} className="cardBody fullHeight scrollbarHidden zoomScroller">
-                <div ref={previewRef} className="markdown zoomContent" dangerouslySetInnerHTML={{ __html: parsed?.html ?? '' }} />
-              </div>
-            ) : (
-              <div className="cardBody fullHeight editorPane zoomEditorPane">
-                <CodeMirror
-                  value={markdown}
-                  theme={theme === 'dark' ? oneDark : cmLightTheme}
-                  extensions={[mdLang()]}
-                  onCreateEditor={(view: EditorView, _state: EditorState) => {
-                    editorViewRef.current = view;
+            <div className="cardBody fullHeight editorPane zoomEditorPane unifiedEditorPane">
+              <CodeMirror
+                value={markdown}
+                theme={theme === 'dark' ? oneDark : cmLightTheme}
+                extensions={[
+                  mdLang(),
+                  EditorView.lineWrapping,
+                  search({ top: true }),
+                  keymap.of([
+                    ...searchKeymap,
+                    { key: 'Mod-h', run: openSearchPanel },
+                    {
+                      key: 'Mod-Enter',
+                      run: (view) => {
+                        const query = new SearchQuery({ search: view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) });
+                        view.dispatch({ effects: setSearchQuery.of(query) });
+                        return openSearchPanel(view);
+                      }
+                    }
+                  ]),
+                  unifiedMarkdownExtension(docPath, imageHeightByLine),
+                  externalLinkClickExtension((url) => {
+                    void openExternalUrl(url);
+                  })
+                ]}
+                onCreateEditor={(view: EditorView, _state: EditorState) => {
+                  editorViewRef.current = view;
+                  setEditorViewVersion((version) => version + 1);
+                  view.dom.style.height = '100%';
+                  view.dom.style.display = 'flex';
+                  view.dom.style.flexDirection = 'column';
+                  view.scrollDOM.style.flex = '1';
+                  view.scrollDOM.style.minHeight = '0';
+                  view.scrollDOM.style.height = '100%';
+                  view.scrollDOM.style.overflow = 'auto';
+                  view.contentDOM.style.minHeight = '100%';
+                  void requestAnimationFrame(() => {
+                    syncScrollerMetrics(view.scrollDOM);
+                  });
+                }}
+                onUpdate={(update) => {
+                  if (update.selectionSet || update.viewportChanged || update.geometryChanged) {
                     setEditorViewVersion((version) => version + 1);
-                    view.dom.style.height = '100%';
-                    view.dom.style.display = 'flex';
-                    view.dom.style.flexDirection = 'column';
-                    view.scrollDOM.style.flex = '1';
-                    view.scrollDOM.style.minHeight = '0';
-                    view.scrollDOM.style.height = '100%';
-                    view.scrollDOM.style.overflow = 'auto';
-                    view.contentDOM.style.minHeight = '100%';
-                    void requestAnimationFrame(() => {
-                      restoreModeScrollTop('edit', 'create');
-                    });
-                  }}
-                  onChange={(value) => {
-                    markdownRef.current = value;
-                    setMarkdown(value);
-                    window.markflow.docSetMarkdown({ docPath, markdown: value });
-                  }}
-                  basicSetup={{
-                    lineNumbers: true,
-                    highlightActiveLine: true,
-                    foldGutter: true
-                  }}
-                />
+                  }
+                }}
+                onChange={(value) => {
+                  markdownRef.current = value;
+                  setMarkdown(value);
+                  window.markflow.docSetMarkdown({ docPath, markdown: value });
+                }}
+                basicSetup={{
+                  lineNumbers: false,
+                  highlightActiveLine: true,
+                  foldGutter: false
+                }}
+              />
+            </div>
+            {editorImagePreviews.length > 0 ? (
+              <div className="editorImageOverlay" style={{ transform: `translateY(${-currentScrollTop}px)` }} aria-hidden="true">
+                {editorImagePreviews.map((image) => {
+                  const resolved = imageUrlByKey[image.key];
+                  return (
+                    <div
+                      className={`mf-image-preview ${resolved && !resolved.success ? 'failed' : ''}`}
+                      key={image.key}
+                      style={{
+                        top: image.top,
+                        width: imageWidthByKey[image.key] ?? 720,
+                        '--image-reserved-height': `${imageReservedHeight(image.key)}px`
+                      } as React.CSSProperties}
+                    >
+                      {!resolved ? 'Loading image…' : resolved.success ? (
+                        <>
+                          <span className="mf-image-frame" style={{ height: imageRenderedHeight(image.key) }}>
+                            <img
+                              src={resolved.url}
+                              alt={image.alt}
+                              onLoad={(event) => {
+                                const element = event.currentTarget;
+                                const width = element.naturalWidth;
+                                const height = element.naturalHeight;
+                                if (width > 0 && height > 0) {
+                                  setImageNaturalSizeByKey((prev) => ({ ...prev, [image.key]: { width, height } }));
+                                }
+                              }}
+                            />
+                            <span
+                              className="mf-image-resize-handle"
+                              onPointerDown={(event) => beginImageResize(event, image.key)}
+                              title="Drag to resize image"
+                            />
+                          </span>
+                        </>
+                      ) : (
+                        `Image unavailable: ${resolved.message}`
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-            )}
+            ) : null}
             {showScrollIndicator ? (
               <div className={`scrollIndicator ${scrollIndicatorVisible ? 'visible' : ''}`} aria-hidden="true">
                 <div
@@ -1300,25 +1529,7 @@ export function EditView() {
         </div>
       </div>
 
-      {scrollDebugOpen ? (
-        <div className="subbar scrollDebugBar">
-          <div className="left scrollDebugPanel">
-            <span className="pill">Mode {leftMode}</span>
-            <span className="pill">Current {Math.round(currentScrollTop)}</span>
-            <span className="pill">Saved Preview {Math.round(modeScrollTopRef.current.preview)}</span>
-            <span className="pill">Saved Edit {Math.round(modeScrollTopRef.current.edit)}</span>
-            <span className="pill">Live Preview {Math.round(previewLiveScrollTop)}</span>
-            <span className="pill">Live Edit {Math.round(editorLiveScrollTop)}</span>
-            <span className="pill">Editor {editorViewRef.current ? 'ready' : 'pending'}</span>
-            <span className="pill">Preview {previewScrollRef.current ? 'ready' : 'pending'}</span>
-          </div>
-          <div className="right">
-            <span className="statusLine">
-              {`last=${scrollDebugState.lastAction} from=${scrollDebugState.fromMode ?? '-'} to=${scrollDebugState.toMode ?? '-'} attempt=${scrollDebugState.attempt} captured=${scrollDebugState.capturedTop ?? '-'} target=${scrollDebugState.targetTop ?? '-'} actual=${scrollDebugState.actualTop ?? '-'}`}
-            </span>
-          </div>
-        </div>
-      ) : null}
+      {toast ? <div className={`toast ${toast.kind}`}>{toast.text}</div> : null}
 
       <div className="subbar bottomBar">
         <div className="left">
@@ -1329,13 +1540,6 @@ export function EditView() {
           {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
         </div>
         <div className="right">
-          <button
-            className={`btn ${scrollDebugOpen ? 'active' : ''}`}
-            title="Toggle scroll debug panel"
-            onClick={() => setScrollDebugOpen((open) => !open)}
-          >
-            Scroll Debug
-          </button>
           <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
           {updateStatus === 'downloading' ? <span className="pill">Downloading {Math.round(downloadProgress)}%</span> : null}
         </div>

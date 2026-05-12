@@ -56,6 +56,15 @@ export type AppInfo = {
   repositoryUrl: string;
 };
 
+export type OpenExternalResult = { success: true } | { success: false; message: string };
+export type PdfExportResult =
+  | { success: true; filePath: string }
+  | { success: false; canceled?: boolean; message?: string };
+export type QuickOpenState = { url: string };
+export type ImageResolveResult = { success: true; url: string } | { success: false; message: string; url?: string };
+export type PrintRenderPayload = { markdown: string; docPath: string | null };
+export type PrintRenderedResult = { success: true } | { success: false; message: string };
+
 contextBridge.exposeInMainWorld('markflow', {
   platform: process.platform,
   docOpen: () => ipcRenderer.invoke('doc:open'),
@@ -66,6 +75,9 @@ contextBridge.exposeInMainWorld('markflow', {
   folderList: (args: { dirPath: string }) => ipcRenderer.invoke('folder:list', args),
   workspaceStateGet: () => ipcRenderer.invoke('workspace:state:get'),
   workspaceStateSet: (args: { dirPath: string | null }) => ipcRenderer.invoke('workspace:state:set', args),
+  quickOpenGet: () => ipcRenderer.invoke('quickOpen:get'),
+  quickOpenSet: (args: { url: string }) => ipcRenderer.invoke('quickOpen:set', args),
+  resolveImageUrl: (args: { url: string; docPath: string | null }) => ipcRenderer.invoke('asset:resolveImageUrl', args),
 
   contentZoomIn: () => ipcRenderer.send('contentZoom:adjust', 'in'),
   contentZoomOut: () => ipcRenderer.send('contentZoom:adjust', 'out'),
@@ -127,5 +139,12 @@ contextBridge.exposeInMainWorld('markflow', {
   },
 
   appInfo: () => ipcRenderer.invoke('app:info'),
-  openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args)
+  openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args),
+  exportPdf: (args: { markdown: string; docPath: string | null }) => ipcRenderer.invoke('export:pdf', args),
+  onPrintRender: (cb: (payload: PrintRenderPayload) => void) => {
+    const handler = (_: unknown, payload: PrintRenderPayload) => cb(payload);
+    ipcRenderer.on('print:render', handler);
+    return () => ipcRenderer.removeListener('print:render', handler);
+  },
+  printRendered: (payload: PrintRenderedResult) => ipcRenderer.send('print:rendered', payload)
 });

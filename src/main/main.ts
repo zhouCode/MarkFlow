@@ -1,9 +1,10 @@
-import { app, BrowserWindow, ipcMain, protocol, screen, shell } from 'electron';
-import type { Input, Rectangle } from 'electron';
+import { app, BrowserWindow, ipcMain, protocol, screen, session, shell } from 'electron';
+import type { Input, Protocol, Rectangle } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
+import crypto from 'node:crypto';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
@@ -51,6 +52,7 @@ type PersistedState = {
   lastDocPath: string | null;
   lastWorkspaceDirPath: string | null;
   notesSettings: NotesWindowSettings;
+  quickOpenUrl: string;
 };
 
 type ZoomAction = 'in' | 'out' | 'reset';
@@ -103,6 +105,7 @@ const DEFAULT_NOTES_SETTINGS: NotesWindowSettings = {
 };
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
+const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -124,6 +127,7 @@ let currentMarkdown = '';
 let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 let notesContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 let notesSettings: NotesWindowSettings = { ...DEFAULT_NOTES_SETTINGS };
+let quickOpenUrl = DEFAULT_QUICK_OPEN_URL;
 let pendingOpenState: PendingOpenState = { filePath: null };
 let currentNotesState: NotesWindowState | null = null;
 let notesDockState: DockState | null = null;
@@ -132,6 +136,42 @@ let isApplyingDockBounds = false;
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
 }
+
+function normalizeExternalHttpUrl(input: string | null | undefined): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function safeQuickOpenUrl(input: string | null | undefined): string {
+  return normalizeExternalHttpUrl(input) ?? DEFAULT_QUICK_OPEN_URL;
+}
+
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function getStringField(input: unknown, field: string): string | null {
+  if (!isRecord(input)) return null;
+  const value = input[field];
+  return typeof value === 'string' ? value : null;
+}
+
+function getNullableStringField(input: unknown, field: string): string | null {
+  if (!isRecord(input)) return null;
+  const value = input[field];
+  return typeof value === 'string' ? value : null;
+}
+
 
 function sanitizedNotesSettings(input: Partial<NotesWindowSettings> | null | undefined): NotesWindowSettings {
   return {
@@ -147,10 +187,16 @@ async function readPersistedState(): Promise<PersistedState> {
     return {
       lastDocPath: typeof parsed.lastDocPath === 'string' ? parsed.lastDocPath : null,
       lastWorkspaceDirPath: typeof parsed.lastWorkspaceDirPath === 'string' ? parsed.lastWorkspaceDirPath : null,
-      notesSettings: sanitizedNotesSettings(parsed.notesSettings)
+      notesSettings: sanitizedNotesSettings(parsed.notesSettings),
+      quickOpenUrl: safeQuickOpenUrl(parsed.quickOpenUrl)
     };
   } catch {
-    return { lastDocPath: null, lastWorkspaceDirPath: null, notesSettings: { ...DEFAULT_NOTES_SETTINGS } };
+    return {
+      lastDocPath: null,
+      lastWorkspaceDirPath: null,
+      notesSettings: { ...DEFAULT_NOTES_SETTINGS },
+      quickOpenUrl: DEFAULT_QUICK_OPEN_URL
+    };
   }
 }
 
@@ -161,7 +207,8 @@ async function writePersistedState(state: PersistedState): Promise<void> {
     JSON.stringify({
       lastDocPath: state.lastDocPath,
       lastWorkspaceDirPath: state.lastWorkspaceDirPath,
-      notesSettings: sanitizedNotesSettings(state.notesSettings)
+      notesSettings: sanitizedNotesSettings(state.notesSettings),
+      quickOpenUrl: safeQuickOpenUrl(state.quickOpenUrl)
     }),
     'utf-8'
   );
@@ -265,6 +312,10 @@ function isDev(): boolean {
   return !app.isPackaged;
 }
 
+function shouldLoadDevServer(): boolean {
+  return isDev() && Boolean(process.env.VITE_DEV_SERVER_URL);
+}
+
 function preloadPath(): string {
   return path.join(__dirname, '..', 'preload', 'preload.js');
 }
@@ -273,9 +324,9 @@ function devServerUrl(): string {
   return process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173';
 }
 
-function getRendererUrl(view: 'edit' | 'notes'): string {
+function getRendererUrl(view: 'edit' | 'notes' | 'print'): string {
   const q = `?view=${encodeURIComponent(view)}`;
-  if (isDev()) {
+  if (shouldLoadDevServer()) {
     return `${devServerUrl()}/${q}`;
   }
   const indexPath = path.join(__dirname, '..', 'renderer', 'index.html');
@@ -310,13 +361,26 @@ function notesSettingsState(): NotesWindowSettings {
   return { ...notesSettings };
 }
 
+function quickOpenState(): { url: string } {
+  return { url: quickOpenUrl };
+}
+
+async function updateQuickOpenUrl(input: unknown): Promise<{ url: string }> {
+  const normalized = normalizeExternalHttpUrl(getStringField(input, 'url'));
+  if (!normalized) throw new Error('Quick-open URL must use http or https.');
+  quickOpenUrl = normalized;
+  await writeCurrentPersistedState();
+  return quickOpenState();
+}
+
 async function writeCurrentPersistedState(
   input: Partial<Pick<PersistedState, 'lastDocPath' | 'lastWorkspaceDirPath'>> = {}
 ): Promise<void> {
   await writePersistedState({
     lastDocPath: input.lastDocPath ?? currentDocPath,
     lastWorkspaceDirPath: input.lastWorkspaceDirPath ?? currentWorkspaceDirPath,
-    notesSettings
+    notesSettings,
+    quickOpenUrl
   });
 }
 
@@ -650,6 +714,17 @@ function createEditWindow() {
     broadcastContentZoom();
     void openPendingDocumentIfAny();
   });
+  editWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const normalized = normalizeExternalHttpUrl(url);
+    if (normalized) void shell.openExternal(normalized);
+    return { action: 'deny' };
+  });
+  editWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === editWindow?.webContents.getURL() || url.startsWith(getRendererUrl('edit'))) return;
+    event.preventDefault();
+    const normalized = normalizeExternalHttpUrl(url);
+    if (normalized) void shell.openExternal(normalized);
+  });
   editWindow.loadURL(getRendererUrl('edit'));
   editWindow.setMenuBarVisibility(false);
   const syncNotes = () => {
@@ -702,6 +777,17 @@ function createNotesWindow() {
   registerZoomShortcuts(notesWindow, 'notes');
   setWindowPageZoom(notesWindow);
   notesDockState = notesSettings.syncDockWithEdit ? placement.dockState : null;
+  notesWindow.webContents.setWindowOpenHandler(({ url }) => {
+    const normalized = normalizeExternalHttpUrl(url);
+    if (normalized) void shell.openExternal(normalized);
+    return { action: 'deny' };
+  });
+  notesWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === notesWindow?.webContents.getURL() || url.startsWith(getRendererUrl('notes'))) return;
+    event.preventDefault();
+    const normalized = normalizeExternalHttpUrl(url);
+    if (normalized) void shell.openExternal(normalized);
+  });
   notesWindow.loadURL(getRendererUrl('notes'));
   notesWindow.setMenuBarVisibility(false);
 
@@ -729,6 +815,50 @@ function createNotesWindow() {
     notesDockState = null;
     notifyNotesClosed();
   });
+}
+
+
+function toMarkdownAssetUrl(filePath: string): string {
+  return `${MARKFLOW_ASSET_PROTOCOL}://asset?path=${encodeURIComponent(path.normalize(filePath))}`;
+}
+
+function isHttpLikeUrl(value: string): boolean {
+  return /^(?:https?:|data:|blob:|markflow-asset:)/i.test(value);
+}
+
+function stripMarkdownImageDestination(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1).trim();
+  return trimmed;
+}
+
+async function resolveMarkdownImageUrlForRenderer(input: unknown): Promise<{ success: true; url: string } | { success: false; message: string; url?: string }> {
+  const rawUrl = stripMarkdownImageDestination(getStringField(input, 'url') ?? '');
+  const docPath = getNullableStringField(input, 'docPath');
+  if (!rawUrl) return { success: false, message: 'Image URL is empty.' };
+  if (rawUrl.startsWith('#') || rawUrl.startsWith('//') || isHttpLikeUrl(rawUrl)) return { success: true, url: rawUrl };
+
+  let filePath: string;
+  try {
+    if (/^file:/i.test(rawUrl)) {
+      filePath = fileURLToPath(rawUrl);
+    } else if (path.isAbsolute(rawUrl)) {
+      filePath = rawUrl;
+    } else if (docPath) {
+      filePath = path.resolve(path.dirname(docPath), rawUrl);
+    } else {
+      return { success: false, message: 'Relative image paths require a saved Markdown file.' };
+    }
+
+    await fs.access(filePath);
+    return { success: true, url: toMarkdownAssetUrl(filePath) };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : 'Image file could not be resolved.',
+      url: typeof filePath! === 'string' ? toMarkdownAssetUrl(filePath!) : undefined
+    };
+  }
 }
 
 function contentTypeForAsset(filePath: string): string {
@@ -765,20 +895,82 @@ function createAssetResponse(bytes: Buffer, filePath: string): Response {
   });
 }
 
-function registerMarkdownAssetProtocol() {
-  protocol.handle(MARKFLOW_ASSET_PROTOCOL, async (request) => {
-    try {
-      const url = new URL(request.url);
-      const assetPath = url.searchParams.get('path');
-      if (!assetPath) {
-        return new Response('Not found', { status: 404 });
-      }
-      const bytes = await fs.readFile(assetPath);
-      return createAssetResponse(bytes, assetPath);
-    } catch {
+async function handleMarkdownAssetRequest(request: Request): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const assetPath = url.searchParams.get('path');
+    if (!assetPath) {
       return new Response('Not found', { status: 404 });
     }
+    const bytes = await fs.readFile(assetPath);
+    return createAssetResponse(bytes, assetPath);
+  } catch {
+    return new Response('Not found', { status: 404 });
+  }
+}
+
+function registerMarkdownAssetProtocol(targetProtocol: Protocol = protocol) {
+  targetProtocol.handle(MARKFLOW_ASSET_PROTOCOL, handleMarkdownAssetRequest);
+}
+
+function waitForPrintRender(window: BrowserWindow, payload: { markdown: string; docPath: string | null }): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Timed out while rendering PDF content.'));
+    }, 10000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ipcMain.removeListener('print:rendered', onRendered);
+    };
+
+    const onRendered = (event: Electron.IpcMainEvent, result: unknown) => {
+      if (event.sender !== window.webContents) return;
+      cleanup();
+      if (isRecord(result) && result.success === true) {
+        resolve();
+        return;
+      }
+      reject(new Error(getStringField(result, 'message') ?? 'Unable to render PDF content.'));
+    };
+
+    ipcMain.on('print:rendered', onRendered);
+    window.webContents.send('print:render', payload);
   });
+}
+
+async function renderMarkdownPdf(markdown: string, docPath: string | null): Promise<Buffer> {
+  const partition = `pdf-export-${crypto.randomUUID()}`;
+  const pdfSession = session.fromPartition(partition);
+  registerMarkdownAssetProtocol(pdfSession.protocol);
+
+  let pdfWindow: BrowserWindow | null = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: preloadPath(),
+      partition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false
+    }
+  });
+
+  try {
+    const rendererUrl = getRendererUrl('print');
+    pdfWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    pdfWindow.webContents.on('will-navigate', (event, url) => {
+      if (url === pdfWindow?.webContents.getURL() || url.startsWith(rendererUrl)) return;
+      event.preventDefault();
+    });
+    await pdfWindow.loadURL(rendererUrl);
+    await waitForPrintRender(pdfWindow, { markdown, docPath });
+    return await pdfWindow.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true });
+  } finally {
+    pdfWindow?.close();
+    pdfSession.protocol.unhandle(MARKFLOW_ASSET_PROTOCOL);
+    pdfWindow = null;
+  }
 }
 
 app.whenReady().then(async () => {
@@ -793,6 +985,7 @@ app.whenReady().then(async () => {
   const persisted = await readPersistedState();
   currentWorkspaceDirPath = persisted.lastWorkspaceDirPath ? path.resolve(persisted.lastWorkspaceDirPath) : null;
   notesSettings = persisted.notesSettings;
+  quickOpenUrl = safeQuickOpenUrl(persisted.quickOpenUrl);
   if (notesSettings.syncZoomWithEdit) {
     notesContentZoom = editContentZoom;
   }
@@ -887,6 +1080,37 @@ app.whenReady().then(async () => {
 
     await setCurrentWorkspaceDirPath(dirPath);
     return { dirPath: currentWorkspaceDirPath };
+  });
+
+
+  ipcMain.handle('quickOpen:get', async () => quickOpenState());
+
+  ipcMain.handle('quickOpen:set', async (_evt, args: unknown) => updateQuickOpenUrl(args));
+
+  ipcMain.handle('asset:resolveImageUrl', async (_evt, args: unknown) => resolveMarkdownImageUrlForRenderer(args));
+
+  ipcMain.handle('export:pdf', async (_evt, args: unknown) => {
+    const { dialog } = await import('electron');
+    if (!editWindow) return { success: false as const, message: 'Editor window is not available.' };
+    const markdown = getStringField(args, 'markdown');
+    if (markdown == null) {
+      return { success: false as const, message: 'PDF export requires markdown.' };
+    }
+    const docPath = getNullableStringField(args, 'docPath');
+    const defaultBase = docPath ? path.basename(docPath, path.extname(docPath)) : 'markflow-document';
+    const res = await dialog.showSaveDialog(editWindow, {
+      defaultPath: `${defaultBase}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    });
+    if (res.canceled || !res.filePath) return { success: false as const, canceled: true as const };
+
+    try {
+      const pdf = await renderMarkdownPdf(markdown, docPath);
+      await fs.writeFile(res.filePath, pdf);
+      return { success: true as const, filePath: res.filePath };
+    } catch (error) {
+      return { success: false as const, message: error instanceof Error ? error.message : 'PDF export failed.' };
+    }
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {
@@ -1018,8 +1242,10 @@ ipcMain.handle('app:info', async (): Promise<AppInfo> => ({
   version: await resolveAppVersion()
 }));
 
-ipcMain.handle('app:openExternal', async (_evt, args: { url: string }) => {
-  await shell.openExternal(args.url);
+ipcMain.handle('app:openExternal', async (_evt, args: unknown) => {
+  const normalized = normalizeExternalHttpUrl(getStringField(args, 'url'));
+  if (!normalized) return { success: false, message: 'Only http/https URLs can be opened externally.' };
+  await shell.openExternal(normalized);
   return { success: true };
 });
 

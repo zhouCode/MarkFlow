@@ -46,6 +46,15 @@ declare global {
     repositoryUrl: string;
   };
 
+  type OpenExternalResult = { success: true } | { success: false; message: string };
+  type PdfExportResult =
+    | { success: true; filePath: string }
+    | { success: false; canceled?: boolean; message?: string };
+  type QuickOpenState = { url: string };
+  type ImageResolveResult = { success: true; url: string } | { success: false; message: string; url?: string };
+  type PrintRenderPayload = { markdown: string; docPath: string | null };
+  type PrintRenderedResult = { success: true } | { success: false; message: string };
+
   interface Window {
     markflow: {
       platform: string;
@@ -57,6 +66,9 @@ declare global {
       folderList: (args: { dirPath: string }) => Promise<{ dirPath: string; entries: FileBrowserEntry[] }>;
       workspaceStateGet: () => Promise<{ dirPath: string | null }>;
       workspaceStateSet: (args: { dirPath: string | null }) => Promise<{ dirPath: string | null }>;
+      quickOpenGet: () => Promise<QuickOpenState>;
+      quickOpenSet: (args: { url: string }) => Promise<QuickOpenState>;
+      resolveImageUrl: (args: { url: string; docPath: string | null }) => Promise<ImageResolveResult>;
 
       contentZoomIn: () => void;
       contentZoomOut: () => void;
@@ -88,7 +100,10 @@ declare global {
       updateInstall: () => void;
       onUpdateDownloadProgress: (cb: (payload: { percent: number; transferred: number; total: number }) => void) => () => void;
       appInfo: () => Promise<AppInfo>;
-      openExternal: (args: { url: string }) => Promise<{ success: boolean }>;
+      openExternal: (args: { url: string }) => Promise<OpenExternalResult>;
+      exportPdf: (args: { markdown: string; docPath: string | null }) => Promise<PdfExportResult>;
+      onPrintRender: (cb: (payload: PrintRenderPayload) => void) => () => void;
+      printRendered: (payload: PrintRenderedResult) => void;
     };
   }
 }

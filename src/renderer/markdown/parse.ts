@@ -50,7 +50,7 @@ export type ParsedDoc = {
 
 type FrontmatterExtraction = {
   content: string;
-  title: string | null;
+  lineOffset: number;
 };
 
 function extractNoteMarkdown(htmlValue: string): string | null {
@@ -78,37 +78,22 @@ function isBlockNode(node: MdNode): boolean {
   );
 }
 
-function extractFrontmatterTitle(frontmatter: string): string | null {
-  const parsed = parseYaml(frontmatter);
-  const title = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).title : null;
-  if (typeof title === 'string') {
-    const trimmed = title.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-  if (typeof title === 'number' || typeof title === 'boolean') {
-    return String(title);
-  }
-  return null;
-}
-
-function extractLeadingYamlFrontmatter(markdown: string): FrontmatterExtraction {
+export function extractLeadingYamlFrontmatter(markdown: string): FrontmatterExtraction {
   const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!match) return { content: markdown, title: null };
+  if (!match) return { content: markdown, lineOffset: 0 };
 
   const frontmatter = match[1] ?? '';
 
   try {
     const parsed = parseYaml(frontmatter);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return { content: markdown, title: null };
+      return { content: markdown, lineOffset: 0 };
     }
 
-    return {
-      content: markdown.slice(match[0].length),
-      title: extractFrontmatterTitle(frontmatter)
-    };
+    const consumedLines = match[0].replace(/\r?\n$/, '').split(/\r?\n/).length;
+    return { content: markdown.slice(match[0].length), lineOffset: consumedLines };
   } catch {
-    return { content: markdown, title: null };
+    return { content: markdown, lineOffset: 0 };
   }
 }
 
@@ -152,7 +137,7 @@ function joinRelativePath(baseDir: string, relativePath: string): string {
   return parts.join('/');
 }
 
-function resolveMarkdownImageUrl(url: string, docPath: string | null | undefined): string {
+export function resolveMarkdownImageUrl(url: string, docPath: string | null | undefined): string {
   const trimmed = url.trim();
   if (!trimmed || shouldLeaveImageUrlUnchanged(trimmed)) return url;
   if (isAbsoluteFilesystemPath(trimmed)) return toMarkdownAssetUrl(trimmed);
@@ -161,29 +146,8 @@ function resolveMarkdownImageUrl(url: string, docPath: string | null | undefined
   return toMarkdownAssetUrl(joinRelativePath(dirname(docPath), trimmed));
 }
 
-function createSyntheticTitleHeading(title: string): MdNode {
-  return {
-    type: 'heading',
-    depth: 1,
-    children: [{ type: 'text', value: title }],
-    data: { mfSyntheticTitle: true }
-  };
-}
-
-function remarkFrontmatterTitleAndImages(options?: { docPath?: string | null; frontmatterTitle?: string | null }) {
+function remarkImages(options?: { docPath?: string | null }) {
   return (tree: MdRoot) => {
-    const children: MdNode[] = Array.isArray(tree.children) ? tree.children : [];
-    let nextChildren = children;
-
-    if (options?.frontmatterTitle) {
-      const startsWithH1 = nextChildren[0]?.type === 'heading' && nextChildren[0]?.depth === 1;
-      if (!startsWithH1) {
-        nextChildren = [createSyntheticTitleHeading(options.frontmatterTitle), ...nextChildren];
-      }
-    }
-
-    tree.children = nextChildren;
-
     if (!options?.docPath) return;
 
     visit(tree, 'image', (node: MdNode) => {
@@ -272,9 +236,8 @@ export async function renderMarkdown(markdown: string, options?: { docPath?: str
     .use(remarkParse)
     .use(remarkGfm)
     .use(remarkMath)
-    .use(remarkFrontmatterTitleAndImages, {
-      docPath: options?.docPath,
-      frontmatterTitle: frontmatter.title
+    .use(remarkImages, {
+      docPath: options?.docPath
     })
     .use(remarkNotesAndAnchors)
     .use(remarkRehype, { allowDangerousHtml: false })
@@ -286,8 +249,18 @@ export async function renderMarkdown(markdown: string, options?: { docPath?: str
   const html = String(file);
 
   const mf = (file.data as any)?.mf ?? { anchors: [], notes: [] };
-  const anchors: BlockAnchor[] = mf.anchors ?? [];
-  const notes: Note[] = mf.notes ?? [];
+  const shiftRange = (range: { startLine: number; endLine: number }) => ({
+    startLine: range.startLine + frontmatter.lineOffset,
+    endLine: range.endLine + frontmatter.lineOffset
+  });
+  const anchors: BlockAnchor[] = (mf.anchors ?? []).map((anchor: BlockAnchor) => ({
+    ...anchor,
+    sourceRange: shiftRange(anchor.sourceRange)
+  }));
+  const notes: Note[] = (mf.notes ?? []).map((note: Note) => ({
+    ...note,
+    sourceRange: shiftRange(note.sourceRange)
+  }));
 
   return { html, anchors, notes };
 }
