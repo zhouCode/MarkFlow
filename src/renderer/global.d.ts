@@ -54,6 +54,9 @@ declare global {
   type ImageResolveResult = { success: true; url: string } | { success: false; message: string; url?: string };
   type PrintRenderPayload = { markdown: string; docPath: string | null };
   type PrintRenderedResult = { success: true } | { success: false; message: string };
+  type WebTabState = { id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; zoomFactor: number };
+  type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
+  type WebTabListResult = { success: true; tabs: WebTabState[] } | { success: false; message: string };
 
   interface Window {
     markflow: {
@@ -101,6 +104,16 @@ declare global {
       onUpdateDownloadProgress: (cb: (payload: { percent: number; transferred: number; total: number }) => void) => () => void;
       appInfo: () => Promise<AppInfo>;
       openExternal: (args: { url: string }) => Promise<OpenExternalResult>;
+      webTabList: () => Promise<WebTabListResult>;
+      webTabCreate: (args: { url: string; reuseExisting?: boolean }) => Promise<WebTabResult>;
+      webTabFocus: (args: { id: string | null }) => Promise<WebTabResult>;
+      webTabClose: (args: { id: string }) => Promise<WebTabResult>;
+      webTabNavigate: (args: { id: string; url: string }) => Promise<WebTabResult>;
+      webTabSetBounds: (args: { id: string; x: number; y: number; width: number; height: number }) => Promise<WebTabResult>;
+      webTabSetZoom: (args: { id: string; zoomFactor: number }) => Promise<WebTabResult>;
+      webTabAdjustZoom: (args: { id: string; action: 'in' | 'out' | 'reset' }) => Promise<WebTabResult>;
+      onWebTabUpdated: (cb: (payload: WebTabState) => void) => () => void;
+      onWebTabListChanged: (cb: (payload: WebTabState[]) => void) => () => void;
       exportPdf: (args: { markdown: string; docPath: string | null }) => Promise<PdfExportResult>;
       onPrintRender: (cb: (payload: PrintRenderPayload) => void) => () => void;
       printRendered: (payload: PrintRenderedResult) => void;

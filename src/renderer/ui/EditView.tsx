@@ -3,13 +3,19 @@ import CodeMirror from '@uiw/react-codemirror';
 import { markdown as mdLang } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
-import type { EditorState, Extension, Range } from '@codemirror/state';
+import { Compartment, type EditorState, type Extension, type Range } from '@codemirror/state';
+import { history, historyKeymap, redo, undo } from '@codemirror/commands';
 import {
   openSearchPanel,
   search,
   searchKeymap,
   setSearchQuery,
-  SearchQuery
+  SearchQuery,
+  findNext,
+  findPrevious,
+  replaceAll,
+  replaceNext,
+  selectMatches
 } from '@codemirror/search';
 import { useParsedDoc } from './useParsedDoc';
 import { extractLeadingYamlFrontmatter, renderInlineMarkdown } from '../markdown/parse';
@@ -27,10 +33,116 @@ type BlockMetric = {
 
 const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
 
+type MenuKind = 'function' | 'edit' | null;
+
 type ToastMessage = {
   kind: 'info' | 'error';
   text: string;
 };
+
+type AppTab = { id: 'markdown'; kind: 'markdown'; title: string } | { id: string; kind: 'web'; title: string; url: string };
+
+const editorEditableCompartment = new Compartment();
+
+
+function createExpandableSearchPanel(view: EditorView) {
+  let expanded = false;
+  let query = new SearchQuery({ search: '' });
+
+  const searchField = document.createElement('input');
+  searchField.className = 'cm-textfield';
+  searchField.name = 'search';
+  searchField.placeholder = 'Find';
+  searchField.setAttribute('aria-label', 'Find');
+  searchField.setAttribute('main-field', 'true');
+
+  const replaceField = document.createElement('input');
+  replaceField.className = 'cm-textfield replaceField';
+  replaceField.name = 'replace';
+  replaceField.placeholder = 'Replace';
+  replaceField.setAttribute('aria-label', 'Replace');
+
+  const dom = document.createElement('div');
+  dom.className = 'cm-search mf-search-panel';
+
+  const expandButton = document.createElement('button');
+  expandButton.className = 'cm-button mf-search-expand';
+  expandButton.type = 'button';
+  expandButton.textContent = '>';
+  expandButton.title = 'Show replace';
+
+  const replaceRow = document.createElement('div');
+  replaceRow.className = 'mf-search-replace-row';
+
+  const commit = () => {
+    const next = new SearchQuery({ search: searchField.value, replace: replaceField.value });
+    if (!next.eq(query)) {
+      query = next;
+      view.dispatch({ effects: setSearchQuery.of(query) });
+    }
+  };
+
+  const button = (name: string, label: string, onClick: () => void) => {
+    const el = document.createElement('button');
+    el.className = 'cm-button';
+    el.name = name;
+    el.type = 'button';
+    el.textContent = label;
+    el.onclick = onClick;
+    return el;
+  };
+
+  const setExpanded = (value: boolean) => {
+    expanded = value;
+    dom.classList.toggle('replaceExpanded', expanded);
+    expandButton.textContent = expanded ? '⌄' : '>';
+    expandButton.title = expanded ? 'Hide replace' : 'Show replace';
+  };
+
+  searchField.oninput = commit;
+  replaceField.oninput = commit;
+  searchField.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      (event.shiftKey ? findPrevious : findNext)(view);
+    }
+  };
+  replaceField.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      replaceNext(view);
+    }
+  };
+  expandButton.onclick = () => setExpanded(!expanded);
+
+  dom.append(
+    expandButton,
+    searchField,
+    button('next', 'next', () => findNext(view)),
+    button('prev', 'previous', () => findPrevious(view)),
+    button('select', 'all', () => selectMatches(view))
+  );
+  replaceRow.append(
+    replaceField,
+    button('replace', 'replace', () => replaceNext(view)),
+    button('replaceAll', 'replace all', () => replaceAll(view))
+  );
+  dom.append(replaceRow);
+
+  setExpanded(false);
+
+  return {
+    dom,
+    top: true,
+    mount() {
+      searchField.focus();
+      searchField.select();
+    },
+    update() {
+      // The panel owns query updates through its inputs; external query updates are rare here.
+    }
+  };
+}
 
 function normalizeExternalHttpUrl(input: string): string | null {
   const trimmed = input.trim();
@@ -147,7 +259,8 @@ function markdownUnifiedDecorations(
   view: EditorView,
   metadataEndLine: number,
   docPath: string | null,
-  imageHeightByLine: Map<number, number>
+  imageHeightByLine: Map<number, number>,
+  presentationMode: boolean
 ): DecorationSet {
   const ranges: Range<Decoration>[] = [];
   const { from: selectedFromLine, to: selectedToLine } = selectedLines(view.state);
@@ -165,7 +278,7 @@ function markdownUnifiedDecorations(
     const line = view.state.doc.line(lineNumber);
     const text = line.text;
     const isActive = lineNumber >= selectedFromLine && lineNumber <= selectedToLine;
-    const nearActive = Math.abs(lineNumber - activeLineNumber) <= 1 || isActive;
+    const nearActive = !presentationMode && (Math.abs(lineNumber - activeLineNumber) <= 1 || isActive);
 
     if (!inCodeFence && (inNoteComment || /<!--\s*note(?::|\s)/i.test(text))) {
       addLineClass(lineNumber, 'mf-note-source-line');
@@ -279,18 +392,18 @@ function markdownUnifiedDecorations(
   return Decoration.set(ranges, true);
 }
 
-function unifiedMarkdownExtension(docPath: string | null, imageHeightByLine: Map<number, number>): Extension {
+function unifiedMarkdownExtension(docPath: string | null, imageHeightByLine: Map<number, number>, presentationMode: boolean): Extension {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
 
       constructor(view: EditorView) {
-        this.decorations = markdownUnifiedDecorations(view, leadingMetadataEndLine(view.state.doc.toString()), docPath, imageHeightByLine);
+        this.decorations = markdownUnifiedDecorations(view, leadingMetadataEndLine(view.state.doc.toString()), docPath, imageHeightByLine, presentationMode);
       }
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.selectionSet || update.viewportChanged) {
-          this.decorations = markdownUnifiedDecorations(update.view, leadingMetadataEndLine(update.view.state.doc.toString()), docPath, imageHeightByLine);
+          this.decorations = markdownUnifiedDecorations(update.view, leadingMetadataEndLine(update.view.state.doc.toString()), docPath, imageHeightByLine, presentationMode);
         }
       }
     },
@@ -302,10 +415,18 @@ function unifiedMarkdownExtension(docPath: string | null, imageHeightByLine: Map
 
 function findMarkdownLinkAt(text: string, offset: number): string | null {
   for (const match of text.matchAll(/!?\[[^\]\n]+\]\(([^\)\n]+)\)/g)) {
+    const isImage = match[0].startsWith('!');
     const start = match.index ?? 0;
     const end = start + match[0].length;
     if (offset < start || offset > end) continue;
-    const url = match[1]?.trim() ?? '';
+    const labelStart = start + (isImage ? 2 : 1);
+    const labelEnd = start + match[0].indexOf('](');
+    const rawUrl = match[1]?.trim() ?? '';
+    const urlStart = end - rawUrl.length - 1;
+    const onVisibleLabel = offset >= labelStart && offset <= labelEnd;
+    const onRawUrl = offset >= urlStart && offset <= end - 1;
+    if (!onVisibleLabel && !onRawUrl) continue;
+    const url = rawUrl;
     return normalizeExternalHttpUrl(url);
   }
   return null;
@@ -321,20 +442,230 @@ function findBareUrlAt(text: string, offset: number): string | null {
 }
 
 function externalLinkClickExtension(openUrl: (url: string) => void): Extension {
+  const urlAtMouseEvent = (event: MouseEvent, view: EditorView) => {
+    const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (position == null) return null;
+    const line = view.state.doc.lineAt(position);
+    const offset = position - line.from;
+    return findMarkdownLinkAt(line.text, offset) ?? findBareUrlAt(line.text, offset);
+  };
+
   return EditorView.domEventHandlers({
-    click(event, view) {
-      if (!(event.metaKey || event.ctrlKey)) return false;
-      const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      if (position == null) return false;
-      const line = view.state.doc.lineAt(position);
-      const offset = position - line.from;
-      const url = findMarkdownLinkAt(line.text, offset) ?? findBareUrlAt(line.text, offset);
+    mousedown(event, view) {
+      if (event.button !== 0 || !(event.metaKey || event.ctrlKey)) return false;
+      const url = urlAtMouseEvent(event, view);
+      if (!url) return false;
+      event.preventDefault();
+      return true;
+    },
+    mouseup(event, view) {
+      if (event.button !== 0 || !(event.metaKey || event.ctrlKey)) return false;
+      const url = urlAtMouseEvent(event, view);
       if (!url) return false;
       event.preventDefault();
       openUrl(url);
       return true;
+    },
+    click(event, view) {
+      if (event.button !== 0 || !(event.metaKey || event.ctrlKey)) return false;
+      const url = urlAtMouseEvent(event, view);
+      if (!url) return false;
+      event.preventDefault();
+      return true;
     }
   });
+}
+
+function isBlankSelection(state: EditorState): boolean {
+  return state.selection.main.empty;
+}
+
+function selectedLineRange(state: EditorState) {
+  const fromLine = state.doc.lineAt(state.selection.main.from);
+  const toLine = state.doc.lineAt(
+    state.selection.main.to > state.selection.main.from && state.selection.main.to === state.doc.lineAt(state.selection.main.to).from
+      ? state.selection.main.to - 1
+      : state.selection.main.to
+  );
+  return {
+    from: fromLine.from,
+    to: toLine.to,
+    text: state.doc.sliceString(fromLine.from, toLine.to)
+  };
+}
+
+function wrapSelection(view: EditorView, before: string, after = before, placeholder = 'text') {
+  const selection = view.state.selection.main;
+  const selected = view.state.sliceDoc(selection.from, selection.to);
+  const line = view.state.doc.lineAt(selection.from);
+  const lineOffsetFrom = selection.from - line.from;
+  const lineOffsetTo = selection.to - line.from;
+  const expandedLineText = line.text;
+  const markerBefore = expandedLineText.lastIndexOf(before, Math.max(0, lineOffsetFrom));
+  const markerAfter = expandedLineText.indexOf(after, lineOffsetTo);
+  const canUseSurroundingMarkers =
+    markerBefore >= 0 &&
+    markerAfter >= lineOffsetTo &&
+    markerBefore + before.length <= lineOffsetFrom &&
+    (selection.empty || markerAfter >= lineOffsetTo);
+  if (canUseSurroundingMarkers) {
+    const from = line.from + markerBefore;
+    const to = line.from + markerAfter;
+    view.dispatch({
+      changes: [
+        { from: to, to: to + after.length },
+        { from, to: from + before.length }
+      ],
+      selection: {
+        anchor: Math.max(from, selection.from - before.length),
+        head: Math.max(from, selection.to - before.length)
+      },
+      scrollIntoView: true
+    });
+    view.focus();
+    return true;
+  }
+  if (
+    selected &&
+    view.state.sliceDoc(Math.max(0, selection.from - before.length), selection.from) === before &&
+    view.state.sliceDoc(selection.to, Math.min(view.state.doc.length, selection.to + after.length)) === after
+  ) {
+    view.dispatch({
+      changes: [
+        { from: selection.to, to: selection.to + after.length },
+        { from: selection.from - before.length, to: selection.from }
+      ],
+      selection: { anchor: selection.from - before.length, head: selection.to - before.length },
+      scrollIntoView: true
+    });
+    view.focus();
+    return true;
+  }
+  if (selected.startsWith(before) && selected.endsWith(after) && selected.length >= before.length + after.length) {
+    const inner = selected.slice(before.length, selected.length - after.length);
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: inner },
+      selection: { anchor: selection.from, head: selection.from + inner.length },
+      scrollIntoView: true
+    });
+    view.focus();
+    return true;
+  }
+  const insert = selected || placeholder;
+  view.dispatch({
+    changes: { from: selection.from, to: selection.to, insert: `${before}${insert}${after}` },
+    selection: {
+      anchor: selected ? selection.from + before.length : selection.from + before.length,
+      head: selected ? selection.to + before.length : selection.from + before.length + placeholder.length
+    },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function toggleHeading(view: EditorView, level: 1 | 2 | 3) {
+  const range = selectedLineRange(view.state);
+  const target = `${'#'.repeat(level)} `;
+  const lines = range.text.split('\n');
+  const everyTarget = lines.every((line) => new RegExp(`^\\s{0,3}${'#'.repeat(level)}\\s+`).test(line));
+  const insert = lines
+    .map((line) => {
+      if (everyTarget) return line.replace(/^\s{0,3}#{1,6}\s+/, '');
+      const withoutHeading = line.replace(/^\s{0,3}#{1,6}\s+/, '');
+      return `${target}${withoutHeading}`;
+    })
+    .join('\n');
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert },
+    selection: { anchor: range.from, head: range.from + insert.length },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function toggleLinePrefix(view: EditorView, prefix: '- ' | '1. ') {
+  const range = selectedLineRange(view.state);
+  const lines = range.text.split('\n');
+  const bulletPattern = /^(\s*)[-*+]\s+/;
+  const numberedPattern = /^(\s*)\d+\.\s+/;
+  const targetPattern = prefix === '- ' ? bulletPattern : numberedPattern;
+  const everyTarget = lines.every((line) => targetPattern.test(line));
+  const insert = lines
+    .map((line) => {
+      if (everyTarget) return line.replace(targetPattern, '$1');
+      const withoutList = line.replace(bulletPattern, '$1').replace(numberedPattern, '$1');
+      return withoutList.replace(/^(\s*)/, `$1${prefix}`);
+    })
+    .join('\n');
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert },
+    selection: { anchor: range.from, head: range.from + insert.length },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function toggleTaskList(view: EditorView) {
+  const range = selectedLineRange(view.state);
+  const lines = range.text.split('\n');
+  const everyTask = lines.every((line) => /^\s*[-*+]\s+\[[ xX]\]\s+/.test(line));
+  const insert = lines
+    .map((line) => {
+      if (everyTask) return line.replace(/^(\s*)[-*+]\s+\[[ xX]\]\s+/, '$1');
+      if (/^\s*[-*+]\s+/.test(line)) return line.replace(/^(\s*[-*+]\s+)/, '$1[ ] ');
+      return line.replace(/^(\s*)/, '$1- [ ] ');
+    })
+    .join('\n');
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert },
+    selection: { anchor: range.from, head: range.from + insert.length },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function insertMarkdownLink(view: EditorView) {
+  const selection = view.state.selection.main;
+  const selected = view.state.sliceDoc(selection.from, selection.to) || 'link text';
+  const insert = `[${selected}](https://)`;
+  view.dispatch({
+    changes: { from: selection.from, to: selection.to, insert },
+    selection: { anchor: selection.from + insert.length - 8, head: selection.from + insert.length - 1 },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function insertMarkdownCodeBlock(view: EditorView) {
+  const selection = view.state.selection.main;
+  const selected = view.state.sliceDoc(selection.from, selection.to);
+  const insert = `\n\`\`\`solidity\n${selected || '// code'}\n\`\`\`\n`;
+  view.dispatch({
+    changes: { from: selection.from, to: selection.to, insert },
+    selection: {
+      anchor: selected ? selection.from + insert.length : selection.from + 13,
+      head: selected ? selection.from + insert.length : selection.from + 20
+    },
+    scrollIntoView: true
+  });
+  view.focus();
+  return true;
+}
+
+function createShortcutLabel(platform: string) {
+  const isMac = platform === 'darwin';
+  const joiner = isMac ? '' : '+';
+  const parts = {
+    mod: isMac ? '⌘' : 'Ctrl',
+    shift: isMac ? '⇧' : 'Shift',
+    alt: isMac ? '⌥' : 'Alt'
+  };
+  return (...keys: Array<'mod' | 'shift' | 'alt' | string>) => keys.map((key) => (key in parts ? parts[key as keyof typeof parts] : key)).join(joiner);
 }
 
 function getParentDirPath(filePath: string): string | null {
@@ -390,6 +721,14 @@ export function EditView() {
   const [aboutOpen, setAboutOpen] = React.useState(false);
   const [quickOpenUrl, setQuickOpenUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
   const [quickOpenDraftUrl, setQuickOpenDraftUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
+  const [webTabs, setWebTabs] = React.useState<WebTabState[]>([]);
+  const [activeTabId, setActiveTabId] = React.useState<string>('markdown');
+  const [addressDraft, setAddressDraft] = React.useState('');
+  const [presentationMode, setPresentationMode] = React.useState(false);
+  const [openMenu, setOpenMenu] = React.useState<MenuKind>(null);
+  const addressInputRef = React.useRef<HTMLInputElement | null>(null);
+  const activeTabIdRef = React.useRef<string>('markdown');
+  const webHostRef = React.useRef<HTMLDivElement | null>(null);
   const [toast, setToast] = React.useState<ToastMessage | null>(null);
   const [imageUrlByKey, setImageUrlByKey] = React.useState<Record<string, ImageResolveResult>>({});
   const [imageWidthByKey, setImageWidthByKey] = React.useState<Record<string, number>>({});
@@ -398,13 +737,11 @@ export function EditView() {
   const [contentScrollHeight, setContentScrollHeight] = React.useState(1);
   const [currentScrollTop, setCurrentScrollTop] = React.useState(0);
   const [currentViewportHeight, setCurrentViewportHeight] = React.useState(1);
-  const [scrollIndicatorVisible, setScrollIndicatorVisible] = React.useState(false);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
   const docPathRef = React.useRef<string | null>(docPath);
   const notesWindowOpenRef = React.useRef(notesWindowOpen);
   const handleOpenFileRef = React.useRef<() => Promise<void>>(async () => {});
-  const scrollIndicatorTimerRef = React.useRef<number | null>(null);
   const toastTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
@@ -414,6 +751,10 @@ export function EditView() {
   React.useEffect(() => {
     docPathRef.current = docPath;
   }, [docPath]);
+
+  React.useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
 
   React.useEffect(() => {
     notesWindowOpenRef.current = notesWindowOpen;
@@ -543,10 +884,29 @@ export function EditView() {
     [showToast]
   );
 
+  const openInternalWebTab = React.useCallback(
+    async (url: string, reuseExisting = false) => {
+      const normalized = normalizeExternalHttpUrl(url);
+      if (!normalized) {
+        showToast({ kind: 'error', text: 'Only http/https URLs can be opened in MarkFlow tabs.' });
+        return false;
+      }
+      const result = await window.markflow.webTabCreate({ url: normalized, reuseExisting });
+      if (!result.success) {
+        showToast({ kind: 'error', text: result.message ?? 'Unable to open tab.' });
+        return false;
+      }
+      setActiveTabId(result.tab.id);
+      setAddressDraft(result.tab.url);
+      return true;
+    },
+    [showToast]
+  );
+
   const handleQuickOpen = React.useCallback(async () => {
-    const opened = await openExternalUrl(quickOpenUrl);
-    if (opened) showToast({ kind: 'info', text: `Opened page ${quickOpenUrl}` });
-  }, [openExternalUrl, quickOpenUrl, showToast]);
+    const opened = await openInternalWebTab(quickOpenUrl, true);
+    if (opened) showToast({ kind: 'info', text: `Opened tab ${quickOpenUrl}` });
+  }, [openInternalWebTab, quickOpenUrl, showToast]);
 
   const handleQuickOpenSave = React.useCallback(async () => {
     const normalized = normalizeExternalHttpUrl(quickOpenDraftUrl);
@@ -566,6 +926,142 @@ export function EditView() {
     }
   }, [quickOpenDraftUrl, quickOpenUrl, showToast]);
 
+  React.useEffect(() => {
+    let cancelled = false;
+    void window.markflow.webTabList().then((result) => {
+      if (!cancelled && result.success) setWebTabs(result.tabs);
+    });
+    const offUpdated = window.markflow.onWebTabUpdated((tab) => {
+      setWebTabs((prev) => {
+        const exists = prev.some((item) => item.id === tab.id);
+        return exists ? prev.map((item) => (item.id === tab.id ? tab : item)) : [...prev, tab];
+      });
+      setActiveTabId((current) => {
+        if (current === tab.id) setAddressDraft(tab.url);
+        return current;
+      });
+    });
+    const offList = window.markflow.onWebTabListChanged((tabs) => {
+      setWebTabs(tabs);
+      setActiveTabId((current) => (current !== 'markdown' && !tabs.some((tab) => tab.id === current) ? 'markdown' : current));
+    });
+    return () => {
+      cancelled = true;
+      offUpdated();
+      offList();
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const activeWebTab = webTabs.find((tab) => tab.id === activeTabId);
+    if (activeWebTab) setAddressDraft(activeWebTab.url);
+  }, [activeTabId, webTabs]);
+
+  React.useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: editorEditableCompartment.reconfigure(EditorView.editable.of(!presentationMode)) });
+  }, [presentationMode, editorViewVersion]);
+
+  const syncActiveWebTabBounds = React.useCallback(() => {
+    const currentActiveTabId = activeTabIdRef.current;
+    if (currentActiveTabId === 'markdown') return;
+    const host = webHostRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    void window.markflow.webTabSetBounds({
+      id: currentActiveTabId,
+      x: Math.round(rect.left),
+      y: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    });
+  }, []);
+
+  React.useEffect(() => {
+    if (activeTabId === 'markdown') {
+      void window.markflow.webTabFocus({ id: null });
+      return;
+    }
+    void window.markflow.webTabFocus({ id: activeTabId }).then((result) => {
+      if (result.success) setAddressDraft(result.tab.url);
+    });
+    syncActiveWebTabBounds();
+    const onResize = () => syncActiveWebTabBounds();
+    window.addEventListener('resize', onResize);
+    const observer = webHostRef.current ? new ResizeObserver(syncActiveWebTabBounds) : null;
+    if (webHostRef.current && observer) observer.observe(webHostRef.current);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      observer?.disconnect();
+    };
+  }, [activeTabId, syncActiveWebTabBounds]);
+
+  React.useLayoutEffect(() => {
+    if (activeTabId === 'markdown') return;
+    syncActiveWebTabBounds();
+  }, [activeTabId, syncActiveWebTabBounds]);
+
+  const focusTab = React.useCallback((id: string) => {
+    setActiveTabId(id);
+  }, []);
+
+  const closeWebTab = React.useCallback(async (id: string) => {
+    const result = await window.markflow.webTabClose({ id });
+    if (!result.success) showToast({ kind: 'error', text: result.message ?? 'Unable to close tab.' });
+    setActiveTabId((current) => (current === id ? 'markdown' : current));
+  }, [showToast]);
+
+  const focusAddressBar = React.useCallback(() => {
+    if (activeTabIdRef.current === 'markdown') setActiveTabId(webTabs[0]?.id ?? 'markdown');
+    window.requestAnimationFrame(() => {
+      addressInputRef.current?.focus();
+      addressInputRef.current?.select();
+    });
+  }, [webTabs]);
+
+  const focusFirstWebTab = React.useCallback(() => {
+    setActiveTabId(webTabs[0]?.id ?? 'markdown');
+  }, [webTabs]);
+
+  const closeCurrentWebTab = React.useCallback(() => {
+    const currentActiveTabId = activeTabIdRef.current;
+    if (currentActiveTabId === 'markdown') return;
+    void closeWebTab(currentActiveTabId);
+  }, [closeWebTab]);
+
+  const navigateActiveWebTab = React.useCallback(async () => {
+    if (activeTabId === 'markdown') return;
+    const normalized = normalizeExternalHttpUrl(addressDraft);
+    if (!normalized) {
+      showToast({ kind: 'error', text: 'Enter a valid http or https URL.' });
+      return;
+    }
+    const result = await window.markflow.webTabNavigate({ id: activeTabId, url: normalized });
+    if (!result.success) showToast({ kind: 'error', text: result.message ?? 'Unable to navigate tab.' });
+  }, [activeTabId, addressDraft, showToast]);
+
+  const adjustActiveWebTabZoom = React.useCallback(async (action: 'in' | 'out' | 'reset') => {
+    const currentActiveTabId = activeTabIdRef.current;
+    if (currentActiveTabId === 'markdown') return false;
+    const result = await window.markflow.webTabAdjustZoom({ id: currentActiveTabId, action });
+    if (!result.success) {
+      showToast({ kind: 'error', text: result.message ?? 'Unable to adjust web zoom.' });
+      return false;
+    }
+    return true;
+  }, [showToast]);
+
+  const runEditorCommand = React.useCallback((command: (view: EditorView) => boolean) => {
+    const view = editorViewRef.current;
+    if (!view) return false;
+    setActiveTabId('markdown');
+    window.requestAnimationFrame(() => {
+      command(view);
+    });
+    return true;
+  }, []);
+
   const handleExportPdf = React.useCallback(async () => {
     const result = await window.markflow.exportPdf({ markdown, docPath });
     if (result.success) {
@@ -578,22 +1074,6 @@ export function EditView() {
     }
     showToast({ kind: 'error', text: result.message ?? 'PDF export failed.' });
   }, [docPath, markdown, showToast]);
-
-  const revealScrollIndicator = React.useCallback(() => {
-    setScrollIndicatorVisible(true);
-    if (scrollIndicatorTimerRef.current !== null) window.clearTimeout(scrollIndicatorTimerRef.current);
-    scrollIndicatorTimerRef.current = window.setTimeout(() => {
-      setScrollIndicatorVisible(false);
-      scrollIndicatorTimerRef.current = null;
-    }, 700);
-  }, []);
-
-  React.useEffect(
-    () => () => {
-      if (scrollIndicatorTimerRef.current !== null) window.clearTimeout(scrollIndicatorTimerRef.current);
-    },
-    []
-  );
 
   const syncScrollerMetrics = React.useCallback((scroller: HTMLElement) => {
     setCurrentScrollTop(scroller.scrollTop);
@@ -848,7 +1328,6 @@ export function EditView() {
     const syncMetrics = () => syncScrollerMetrics(scroller);
     const onScroll = () => {
       syncMetrics();
-      revealScrollIndicator();
     };
     const resizeObserver = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
@@ -865,7 +1344,7 @@ export function EditView() {
       cancelAnimationFrame(raf);
       resizeObserver.disconnect();
     };
-  }, [editorViewVersion, parsed, markdown, contentZoomScale, revealScrollIndicator, syncScrollerMetrics]);
+  }, [editorViewVersion, parsed, markdown, contentZoomScale, syncScrollerMetrics]);
 
   React.useEffect(() => {
     const view = editorViewRef.current;
@@ -942,14 +1421,116 @@ export function EditView() {
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      const key = e.key.toLowerCase();
+      const mod = e.ctrlKey || e.metaKey;
+      const shiftMod = mod && e.shiftKey;
+      const editorActive = activeTabIdRef.current === 'markdown';
+
+      if (mod && !e.shiftKey && e.key === '1') {
+        e.preventDefault();
+        setActiveTabId('markdown');
+        return;
+      }
+      if (mod && !e.shiftKey && e.key === '2') {
+        e.preventDefault();
+        focusFirstWebTab();
+        return;
+      }
+      if (shiftMod && key === 'r') {
+        e.preventDefault();
+        void handleQuickOpen();
+        return;
+      }
+      if (mod && !e.shiftKey && key === 'l') {
+        e.preventDefault();
+        focusAddressBar();
+        return;
+      }
+      if (mod && !e.shiftKey && key === 'w') {
+        e.preventDefault();
+        closeCurrentWebTab();
+        return;
+      }
+      if ((e.altKey && key === 'm') || (mod && key === ',')) {
+        e.preventDefault();
+        setOpenMenu((current) => (current === 'function' ? null : 'function'));
+        return;
+      }
+      if (e.altKey && key === 'e') {
+        e.preventDefault();
+        setOpenMenu((current) => (current === 'edit' ? null : 'edit'));
+        return;
+      }
+      if (shiftMod && key === 'p') {
+        e.preventDefault();
+        setPresentationMode((value) => !value);
+        return;
+      }
+      if (editorActive && mod && !e.shiftKey && key === 'b') {
+        e.preventDefault();
+        runEditorCommand((view) => wrapSelection(view, '**', '**', 'bold'));
+        return;
+      }
+      if (editorActive && mod && !e.shiftKey && key === 'i') {
+        e.preventDefault();
+        runEditorCommand((view) => wrapSelection(view, '*', '*', 'italic'));
+        return;
+      }
+      if (editorActive && shiftMod && key === 'x') {
+        e.preventDefault();
+        runEditorCommand((view) => wrapSelection(view, '~~', '~~', 'strikethrough'));
+        return;
+      }
+      if (editorActive && mod && !e.shiftKey && key === 'k') {
+        e.preventDefault();
+        runEditorCommand(insertMarkdownLink);
+        return;
+      }
+      if (editorActive && shiftMod && e.key === '7') {
+        e.preventDefault();
+        runEditorCommand((view) => toggleLinePrefix(view, '- '));
+        return;
+      }
+      if (editorActive && shiftMod && e.key === '8') {
+        e.preventDefault();
+        runEditorCommand((view) => toggleLinePrefix(view, '1. '));
+        return;
+      }
+      if (editorActive && shiftMod && key === 't') {
+        e.preventDefault();
+        runEditorCommand(toggleTaskList);
+        return;
+      }
+      if (editorActive && shiftMod && key === 'c') {
+        e.preventDefault();
+        runEditorCommand(insertMarkdownCodeBlock);
+        return;
+      }
+      if (editorActive && mod && e.altKey && e.key === '1') {
+        e.preventDefault();
+        runEditorCommand((view) => toggleHeading(view, 1));
+        return;
+      }
+      if (editorActive && mod && e.altKey && e.key === '2') {
+        e.preventDefault();
+        runEditorCommand((view) => toggleHeading(view, 2));
+        return;
+      }
+      if (editorActive && mod && e.altKey && e.key === '3') {
+        e.preventDefault();
+        runEditorCommand((view) => toggleHeading(view, 3));
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract')) {
         e.preventDefault();
-        window.markflow.contentZoomOut();
+        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomOut();
+        else void adjustActiveWebTabZoom('out');
         return;
       }
       if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
         e.preventDefault();
-        window.markflow.contentZoomReset();
+        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomReset();
+        else void adjustActiveWebTabZoom('reset');
         return;
       }
       if (
@@ -957,7 +1538,8 @@ export function EditView() {
         (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd')
       ) {
         e.preventDefault();
-        window.markflow.contentZoomIn();
+        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomIn();
+        else void adjustActiveWebTabZoom('in');
         return;
       }
       if (e.key === 'F5') {
@@ -979,11 +1561,6 @@ export function EditView() {
         window.markflow.docSave({ docPath: docPathRef.current, markdown: markdownRef.current });
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
-        e.preventDefault();
-        setSidebarOpen((open) => !open);
-        return;
-      }
       if (e.key === 'F1') {
         e.preventDefault();
         setAboutOpen((open) => !open);
@@ -998,7 +1575,14 @@ export function EditView() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [
+    adjustActiveWebTabZoom,
+    closeCurrentWebTab,
+    focusAddressBar,
+    focusFirstWebTab,
+    handleQuickOpen,
+    runEditorCommand
+  ]);
 
   const dirty = markdown !== lastSavedMarkdown;
   const entryByPath = React.useMemo(() => new Map(workspaceEntries.map((entry) => [entry.path, entry])), [workspaceEntries]);
@@ -1023,7 +1607,13 @@ export function EditView() {
     [workspaceEntries]
   );
   const currentDocName = React.useMemo(() => getBaseName(docPath), [docPath]);
+  const appTabs = React.useMemo<AppTab[]>(() => [
+    { id: 'markdown', kind: 'markdown', title: currentDocName || 'Markdown' },
+    ...webTabs.map((tab) => ({ id: tab.id, kind: 'web' as const, title: tab.title || tab.url, url: tab.url }))
+  ], [currentDocName, webTabs]);
+  const activeWebTab = React.useMemo(() => webTabs.find((tab) => tab.id === activeTabId) ?? null, [activeTabId, webTabs]);
   const currentWorkspaceName = React.useMemo(() => getBaseName(workspaceDirPath), [workspaceDirPath]);
+  const shortcut = React.useMemo(() => createShortcutLabel(window.markflow.platform), []);
   const contentZoomStyle = React.useMemo(
     () => ({ '--content-zoom': String(contentZoomScale) } as React.CSSProperties),
     [contentZoomScale]
@@ -1106,6 +1696,34 @@ export function EditView() {
     return 'Update';
   }, [downloadProgress, updateStatus, updateVersion]);
 
+  const toggleNotes = React.useCallback(() => {
+    setNotesWindowOpen((open) => {
+      const next = !open;
+      notesWindowOpenRef.current = next;
+      if (next) window.markflow.notesOpen();
+      else window.markflow.notesClose();
+      return next;
+    });
+  }, []);
+
+  const closeMenus = React.useCallback(() => setOpenMenu(null), []);
+
+  const menuMouseDown = React.useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+  }, []);
+
+  const runMenuAction = React.useCallback((action: () => void) => {
+    closeMenus();
+    action();
+  }, [closeMenus]);
+
+  const menuItem = React.useCallback((label: string, shortcut: string, action: () => void, disabled = false) => (
+    <button className="menuItem" disabled={disabled} onMouseDown={menuMouseDown} onClick={() => runMenuAction(action)}>
+      <span>{label}</span>
+      {shortcut ? <kbd>{shortcut}</kbd> : null}
+    </button>
+  ), [menuMouseDown, runMenuAction]);
+
   const imageRenderedHeight = React.useCallback((key: string) => {
     const width = imageWidthByKey[key] ?? 720;
     const natural = imageNaturalSizeByKey[key];
@@ -1141,17 +1759,6 @@ export function EditView() {
     window.addEventListener('pointerup', onUp, { once: true });
   }, [imageWidthByKey]);
 
-  const showScrollIndicator = contentScrollHeight > currentViewportHeight + 8;
-  const scrollIndicatorMetrics = React.useMemo(() => {
-    const scrollable = Math.max(contentScrollHeight, 1);
-    const viewport = Math.max(1, currentViewportHeight);
-    const maxScrollTop = Math.max(1, scrollable - viewport);
-    const thumbHeight = Math.max(28, (viewport / scrollable) * viewport);
-    const maxThumbOffset = Math.max(0, viewport - thumbHeight);
-    const thumbTop = maxThumbOffset === 0 ? 0 : (currentScrollTop / maxScrollTop) * maxThumbOffset;
-    return { thumbHeight, thumbTop };
-  }, [contentScrollHeight, currentScrollTop, currentViewportHeight]);
-
   React.useEffect(() => {
     if (!workspaceDirPath) {
       setCollapsedDirPaths(new Set());
@@ -1176,121 +1783,136 @@ export function EditView() {
 
   return (
     <div className="appShell">
-      <div className="topbar">
-        <div className="topbarMain">
-          <div className="toolbarGroup">
-            <button
-              className="btn"
-              title="Open File (Ctrl/Cmd+O)"
-              onClick={() => {
-                void handleOpenFile();
-              }}
-            >
-              Open
-            </button>
-            <button
-              className="btn"
-              title="Open Folder"
-              onClick={() => {
-                void handleOpenFolder();
-              }}
-            >
-              Folder
-            </button>
-          </div>
-          <div className="toolbarGroup">
-            <button
-              className={`btn toggleBtn ${sidebarOpen ? 'active' : ''}`}
-              title="Toggle Files Sidebar (Ctrl/Cmd+B)"
-              onClick={() => setSidebarOpen((open) => !open)}
-            >
-              Files
-            </button>
-          </div>
-          <div className="toolbarGroup searchToolbar" aria-label="Search and replace">
-            <button className="btn" title="Find / Replace (Ctrl/Cmd+F)" onClick={() => editorViewRef.current && openSearchPanel(editorViewRef.current)}>
-              Find / Replace
-            </button>
-          </div>
-          <div className="toolbarGroup quickOpenToolbar" aria-label="Quick-open website">
-            <button className="btn btnPrimary" title="Open configured page" onClick={() => void handleQuickOpen()}>
-              Open Page
-            </button>
-            <input
-              className="quickOpenInput"
-              value={quickOpenDraftUrl}
-              aria-label="Quick-open URL"
-              onChange={(event) => setQuickOpenDraftUrl(event.target.value)}
-              onBlur={() => void handleQuickOpenSave()}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void handleQuickOpenSave();
-                if (event.key === 'Escape') setQuickOpenDraftUrl(quickOpenUrl);
-              }}
-            />
-          </div>
-          <div className="toolbarGroup">
-            <button className="btn" title="Export current document to PDF" onClick={() => void handleExportPdf()}>
-              Export PDF
-            </button>
-          </div>
+      <div className={`topbar compactChrome ${openMenu ? 'menuOpen' : ''}`}>
+        <div className="toolbarGroup menuGroup">
+          <button className="btn" title="Function menu (Alt+M / Ctrl/Cmd+,)" onClick={() => setOpenMenu((menu) => (menu === 'function' ? null : 'function'))}>
+            ☰ Function
+          </button>
+          {openMenu === 'function' ? (
+            <div className="menuDropdown" onMouseLeave={closeMenus}>
+              {menuItem('Open File', shortcut('mod', 'O'), () => void handleOpenFile())}
+              {menuItem('Open Folder', '', () => void handleOpenFolder())}
+              {menuItem('Switch to Markdown', shortcut('mod', '1'), () => setActiveTabId('markdown'))}
+              {menuItem('Switch to Web', shortcut('mod', '2'), focusFirstWebTab)}
+              {menuItem('Open Remix', shortcut('shift', 'mod', 'R'), () => void handleQuickOpen())}
+              {menuItem('Focus Address', shortcut('mod', 'L'), focusAddressBar)}
+              {menuItem('Close Web Tab', shortcut('mod', 'W'), closeCurrentWebTab, activeTabId === 'markdown')}
+              {menuItem('Toggle Files', '', () => setSidebarOpen((open) => !open))}
+              {menuItem('Toggle Present', shortcut('shift', 'mod', 'P'), () => setPresentationMode((value) => !value))}
+              {menuItem('Export PDF', '', () => void handleExportPdf())}
+              {menuItem('Theme', '', toggleTheme)}
+              {menuItem('About', 'F1', () => setAboutOpen((open) => !open))}
+              {menuItem(updateButtonLabel, '', handleUpdateAction, updateStatus === 'checking')}
+              {menuItem('Toggle Notes', 'F5', toggleNotes)}
+              {menuItem(`Zoom Sync ${notesSettings.syncZoomWithEdit ? '✓' : ''}`, '', () => void updateNotesSettings({ syncZoomWithEdit: !notesSettings.syncZoomWithEdit }))}
+              {menuItem(`Dock Sync ${notesSettings.syncDockWithEdit ? '✓' : ''}`, '', () => void updateNotesSettings({ syncDockWithEdit: !notesSettings.syncDockWithEdit }))}
+            </div>
+          ) : null}
         </div>
-        <div className="topbarAside">
-          <div className="toolbarGroup">
-            <button
-              className={`btn ${aboutOpen ? 'active' : ''}`}
-              title="About MarkFlow (F1)"
-              onClick={() => setAboutOpen((open) => !open)}
-            >
-              About
-            </button>
-            <button className="btn" title="Toggle Theme" onClick={() => toggleTheme()}>
-              Theme
-            </button>
-            <button
-              className={`btn ${updateStatus === 'ready' ? 'danger' : ''}`}
-              title={updateStatus === 'ready' ? 'Restart to Install Update' : 'Check for Updates'}
-              onClick={handleUpdateAction}
-              disabled={updateStatus === 'checking'}
-            >
-              {updateButtonLabel}
-            </button>
-          </div>
-          <div className="toolbarGroup">
-            <button
-              className={`btn toggleBtn ${notesWindowOpen ? 'active' : ''}`}
-              title="Toggle Notes Window (F5)"
-              onClick={() => {
-                setNotesWindowOpen((open) => {
-                  const next = !open;
-                  notesWindowOpenRef.current = next;
-                  if (next) window.markflow.notesOpen();
-                  else window.markflow.notesClose();
-                  return next;
-                });
-              }}
-            >
-              Notes
-            </button>
-            <button
-              className={`btn toggleBtn ${notesSettings.syncZoomWithEdit ? 'active' : ''}`}
-              title="Toggle Notes zoom sync with editor"
-              onClick={() => {
-                void updateNotesSettings({ syncZoomWithEdit: !notesSettings.syncZoomWithEdit });
-              }}
-            >
-              Zoom Sync
-            </button>
-            <button
-              className={`btn toggleBtn ${notesSettings.syncDockWithEdit ? 'active' : ''}`}
-              title="Toggle Notes dock sync with editor"
-              onClick={() => {
-                void updateNotesSettings({ syncDockWithEdit: !notesSettings.syncDockWithEdit });
-              }}
-            >
-              Dock Sync
-            </button>
-          </div>
+
+        <div className="toolbarGroup menuGroup">
+          <button className="btn" title="Edit menu (Alt+E)" onClick={() => setOpenMenu((menu) => (menu === 'edit' ? null : 'edit'))}>
+            ✎ Edit
+          </button>
+          {openMenu === 'edit' ? (
+            <div className="menuDropdown" onMouseLeave={closeMenus}>
+              {menuItem('Undo', shortcut('mod', 'Z'), () => runEditorCommand(undo))}
+              {menuItem('Redo', shortcut('shift', 'mod', 'Z'), () => runEditorCommand(redo))}
+              <div className="menuSeparator" />
+              {menuItem('Bold', shortcut('mod', 'B'), () => runEditorCommand((view) => wrapSelection(view, '**', '**', 'bold')))}
+              {menuItem('Italic', shortcut('mod', 'I'), () => runEditorCommand((view) => wrapSelection(view, '*', '*', 'italic')))}
+              {menuItem('Strikethrough', shortcut('shift', 'mod', 'X'), () => runEditorCommand((view) => wrapSelection(view, '~~', '~~', 'strikethrough')))}
+              {menuItem('Inline Code', shortcut('mod', 'E'), () => runEditorCommand((view) => wrapSelection(view, '`', '`', 'code')))}
+              {menuItem('Link', shortcut('mod', 'K'), () => runEditorCommand(insertMarkdownLink))}
+              {menuItem('Code Block', shortcut('shift', 'mod', 'C'), () => runEditorCommand(insertMarkdownCodeBlock))}
+              <div className="menuSeparator" />
+              {menuItem('Heading 1', shortcut('alt', 'mod', '1'), () => runEditorCommand((view) => toggleHeading(view, 1)))}
+              {menuItem('Heading 2', shortcut('alt', 'mod', '2'), () => runEditorCommand((view) => toggleHeading(view, 2)))}
+              {menuItem('Heading 3', shortcut('alt', 'mod', '3'), () => runEditorCommand((view) => toggleHeading(view, 3)))}
+              {menuItem('Bullet List', shortcut('shift', 'mod', '7'), () => runEditorCommand((view) => toggleLinePrefix(view, '- ')))}
+              {menuItem('Numbered List', shortcut('shift', 'mod', '8'), () => runEditorCommand((view) => toggleLinePrefix(view, '1. ')))}
+              {menuItem('Task List', shortcut('shift', 'mod', 'T'), () => runEditorCommand(toggleTaskList))}
+            </div>
+          ) : null}
         </div>
+
+        <button
+          className={`btn toggleBtn ${presentationMode ? 'active' : ''}`}
+          title={`Toggle classroom presentation mode (${shortcut('shift', 'mod', 'P')})`}
+          onClick={() => setPresentationMode((value) => !value)}
+        >
+          Present
+        </button>
+
+        <div className="tabBar inlineTabs" role="tablist" aria-label="Open content tabs">
+          {appTabs.map((tab) => (
+            <button
+              key={tab.id}
+              className={`tabButton ${activeTabId === tab.id ? 'active' : ''}`}
+              onClick={() => focusTab(tab.id)}
+              title={tab.kind === 'web' ? tab.url : tab.title}
+            >
+              <span className="tabTitle">{tab.kind === 'web' && webTabs.find((item) => item.id === tab.id)?.loading ? '● ' : ''}{tab.title}</span>
+              {tab.kind === 'web' ? (
+                <span
+                  className="tabClose"
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void closeWebTab(tab.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void closeWebTab(tab.id);
+                    }
+                  }}
+                  aria-label={`Close ${tab.title}`}
+                >
+                  ×
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+
+        <input
+          ref={addressInputRef}
+          className="quickOpenInput compactUrlInput"
+          value={activeTabId === 'markdown' ? quickOpenDraftUrl : addressDraft}
+          aria-label={activeTabId === 'markdown' ? 'Quick-open URL' : 'Current tab URL'}
+          onChange={(event) => {
+            if (activeTabId === 'markdown') setQuickOpenDraftUrl(event.target.value);
+            else setAddressDraft(event.target.value);
+          }}
+          onBlur={() => {
+            if (activeTabId === 'markdown') void handleQuickOpenSave();
+            else syncActiveWebTabBounds();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              if (activeTabId === 'markdown') {
+                void handleQuickOpenSave().then(() => handleQuickOpen());
+              } else {
+                void navigateActiveWebTab();
+              }
+            }
+            if (event.key === 'Escape' && activeTabId === 'markdown') setQuickOpenDraftUrl(quickOpenUrl);
+          }}
+        />
+        <button
+          className="btn btnPrimary"
+          title={activeTabId === 'markdown' ? 'Open URL in new tab' : 'Navigate current tab'}
+          onClick={() => {
+            if (activeTabId === 'markdown') void handleQuickOpen();
+            else void navigateActiveWebTab();
+          }}
+        >
+          {activeTabId === 'markdown' ? 'New Tab' : 'Open'}
+        </button>
       </div>
 
       {aboutOpen ? (
@@ -1331,8 +1953,8 @@ export function EditView() {
         </div>
       ) : null}
 
-      <div className="appMain editorWorkspace" style={contentZoomStyle}>
-        <div className={`workspaceSplit ${sidebarOpen ? 'withSidebar' : 'withoutSidebar'}`}>
+      <div className={`appMain editorWorkspace ${presentationMode ? 'presentationMode' : ''}`} style={contentZoomStyle}>
+        <div className={`workspaceSplit ${sidebarOpen ? 'withSidebar' : 'withoutSidebar'} ${activeTabId === 'markdown' ? '' : 'webActive'}`}>
           {sidebarOpen ? (
             <aside className="card workspaceSidebar">
               <div className="cardHeader workspaceSidebarHeader">
@@ -1420,8 +2042,11 @@ export function EditView() {
                 extensions={[
                   mdLang(),
                   EditorView.lineWrapping,
-                  search({ top: true }),
+                  editorEditableCompartment.of(EditorView.editable.of(!presentationMode)),
+                  history(),
+                  search({ top: true, createPanel: createExpandableSearchPanel }),
                   keymap.of([
+                    ...historyKeymap,
                     ...searchKeymap,
                     { key: 'Mod-h', run: openSearchPanel },
                     {
@@ -1433,9 +2058,9 @@ export function EditView() {
                       }
                     }
                   ]),
-                  unifiedMarkdownExtension(docPath, imageHeightByLine),
+                  unifiedMarkdownExtension(docPath, imageHeightByLine, presentationMode),
                   externalLinkClickExtension((url) => {
-                    void openExternalUrl(url);
+                    void openInternalWebTab(url);
                   })
                 ]}
                 onCreateEditor={(view: EditorView, _state: EditorState) => {
@@ -1459,6 +2084,7 @@ export function EditView() {
                   }
                 }}
                 onChange={(value) => {
+                  if (presentationMode) return;
                   markdownRef.current = value;
                   setMarkdown(value);
                   window.markflow.docSetMarkdown({ docPath, markdown: value });
@@ -1514,18 +2140,8 @@ export function EditView() {
                 })}
               </div>
             ) : null}
-            {showScrollIndicator ? (
-              <div className={`scrollIndicator ${scrollIndicatorVisible ? 'visible' : ''}`} aria-hidden="true">
-                <div
-                  className="scrollIndicatorThumb"
-                  style={{
-                    height: `${scrollIndicatorMetrics.thumbHeight}px`,
-                    transform: `translateY(${scrollIndicatorMetrics.thumbTop}px)`
-                  }}
-                />
-              </div>
-            ) : null}
           </div>
+          {activeTabId !== 'markdown' ? <div ref={webHostRef} className="webTabHost" aria-label="Internal web tab content" /> : null}
         </div>
       </div>
 
@@ -1540,7 +2156,9 @@ export function EditView() {
           {workspaceDirPath ? <span className="pill">Folder {currentWorkspaceName}</span> : null}
         </div>
         <div className="right">
-          <span className="pill">Zoom {Math.round(contentZoomScale * 100)}%</span>
+          <span className="pill" title={activeTabId === 'markdown' ? 'Document zoom' : 'Web page zoom (Ctrl/Cmd +/-/0)'}>
+            Zoom {activeTabId === 'markdown' ? Math.round(contentZoomScale * 100) : Math.round((activeWebTab?.zoomFactor ?? 1) * 100)}%
+          </span>
           {updateStatus === 'downloading' ? <span className="pill">Downloading {Math.round(downloadProgress)}%</span> : null}
         </div>
       </div>

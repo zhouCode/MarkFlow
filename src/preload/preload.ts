@@ -64,6 +64,9 @@ export type QuickOpenState = { url: string };
 export type ImageResolveResult = { success: true; url: string } | { success: false; message: string; url?: string };
 export type PrintRenderPayload = { markdown: string; docPath: string | null };
 export type PrintRenderedResult = { success: true } | { success: false; message: string };
+export type WebTabState = { id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; zoomFactor: number };
+export type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
+export type WebTabListResult = { success: true; tabs: WebTabState[] } | { success: false; message: string };
 
 contextBridge.exposeInMainWorld('markflow', {
   platform: process.platform,
@@ -140,6 +143,24 @@ contextBridge.exposeInMainWorld('markflow', {
 
   appInfo: () => ipcRenderer.invoke('app:info'),
   openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args),
+  webTabList: () => ipcRenderer.invoke('webTab:list'),
+  webTabCreate: (args: { url: string; reuseExisting?: boolean }) => ipcRenderer.invoke('webTab:create', args),
+  webTabFocus: (args: { id: string | null }) => ipcRenderer.invoke('webTab:focus', args),
+  webTabClose: (args: { id: string }) => ipcRenderer.invoke('webTab:close', args),
+  webTabNavigate: (args: { id: string; url: string }) => ipcRenderer.invoke('webTab:navigate', args),
+  webTabSetBounds: (args: { id: string; x: number; y: number; width: number; height: number }) => ipcRenderer.invoke('webTab:setBounds', args),
+  webTabSetZoom: (args: { id: string; zoomFactor: number }) => ipcRenderer.invoke('webTab:setZoom', args),
+  webTabAdjustZoom: (args: { id: string; action: 'in' | 'out' | 'reset' }) => ipcRenderer.invoke('webTab:adjustZoom', args),
+  onWebTabUpdated: (cb: (payload: WebTabState) => void) => {
+    const handler = (_: unknown, payload: WebTabState) => cb(payload);
+    ipcRenderer.on('webTab:updated', handler);
+    return () => ipcRenderer.removeListener('webTab:updated', handler);
+  },
+  onWebTabListChanged: (cb: (payload: WebTabState[]) => void) => {
+    const handler = (_: unknown, payload: WebTabState[]) => cb(payload);
+    ipcRenderer.on('webTab:listChanged', handler);
+    return () => ipcRenderer.removeListener('webTab:listChanged', handler);
+  },
   exportPdf: (args: { markdown: string; docPath: string | null }) => ipcRenderer.invoke('export:pdf', args),
   onPrintRender: (cb: (payload: PrintRenderPayload) => void) => {
     const handler = (_: unknown, payload: PrintRenderPayload) => cb(payload);

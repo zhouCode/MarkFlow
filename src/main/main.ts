@@ -1,5 +1,5 @@
-import { app, BrowserWindow, ipcMain, protocol, screen, session, shell } from 'electron';
-import type { Input, Protocol, Rectangle } from 'electron';
+import { app, BrowserWindow, WebContentsView, ipcMain, protocol, screen, session, shell } from 'electron';
+import type { Input, IpcMainInvokeEvent, Protocol, Rectangle } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -90,6 +90,27 @@ type CompanionPlacement = {
   dockState: DockState | null;
 };
 
+type WebTabState = {
+  id: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  zoomFactor: number;
+};
+
+type WebTabRecord = {
+  id: string;
+  view: WebContentsView;
+  state: WebTabState;
+  bounds: Rectangle;
+};
+
+type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
+type WebTabListResult = { success: true; tabs: WebTabState[] } | { success: false; message: string };
+
+
 const EDIT_CONTENT_ZOOM_STEP = 0.1;
 const EDIT_CONTENT_ZOOM_MIN = 0.7;
 const EDIT_CONTENT_ZOOM_MAX = 2;
@@ -106,6 +127,23 @@ const DEFAULT_NOTES_SETTINGS: NotesWindowSettings = {
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
 const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
+const WEB_TAB_PARTITION = 'persist:markflow-web-tabs';
+const WEB_TAB_ZOOM_STEP = 0.1;
+const WEB_TAB_ZOOM_MIN = 0.5;
+const WEB_TAB_ZOOM_MAX = 3;
+const DEFAULT_WEB_TAB_ZOOM_FACTOR = 1;
+
+function chromeLikeUserAgent(): string {
+  const platform =
+    process.platform === 'darwin'
+      ? 'Macintosh; Intel Mac OS X 10_15_7'
+      : process.platform === 'win32'
+        ? 'Windows NT 10.0; Win64; x64'
+        : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+}
+
+const WEB_TAB_USER_AGENT = chromeLikeUserAgent();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -132,6 +170,8 @@ let pendingOpenState: PendingOpenState = { filePath: null };
 let currentNotesState: NotesWindowState | null = null;
 let notesDockState: DockState | null = null;
 let isApplyingDockBounds = false;
+const webTabs = new Map<string, WebTabRecord>();
+let activeWebTabId: string | null = null;
 
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
@@ -153,6 +193,249 @@ function normalizeExternalHttpUrl(input: string | null | undefined): string | nu
 
 function safeQuickOpenUrl(input: string | null | undefined): string {
   return normalizeExternalHttpUrl(input) ?? DEFAULT_QUICK_OPEN_URL;
+}
+
+
+function normalizeInternalWebUrl(input: string | null | undefined): string | null {
+  const normalized = normalizeExternalHttpUrl(input);
+  if (!normalized) return null;
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedEditSender(event: IpcMainInvokeEvent): boolean {
+  return Boolean(editWindow && !editWindow.isDestroyed() && event.sender.id === editWindow.webContents.id);
+}
+
+function cloneWebTabState(state: WebTabState): WebTabState {
+  return { ...state };
+}
+
+function clampWebTabZoomFactor(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_WEB_TAB_ZOOM_FACTOR;
+  return Math.max(WEB_TAB_ZOOM_MIN, Math.min(WEB_TAB_ZOOM_MAX, Math.round(value * 100) / 100));
+}
+
+function webTabStates(): WebTabState[] {
+  return [...webTabs.values()].map((tab) => cloneWebTabState(tab.state));
+}
+
+function sendWebTabUpdate(record: WebTabRecord) {
+  editWindow?.webContents.send('webTab:updated', cloneWebTabState(record.state));
+}
+
+function sendWebTabsChanged() {
+  editWindow?.webContents.send('webTab:listChanged', webTabStates());
+}
+
+function setWebTabState(record: WebTabRecord, patch: Partial<WebTabState>) {
+  record.state = { ...record.state, ...patch };
+  sendWebTabUpdate(record);
+  sendWebTabsChanged();
+}
+
+function hideWebTab(record: WebTabRecord) {
+  try {
+    record.view.setBounds({ x: -10000, y: -10000, width: 1, height: 1 });
+  } catch {
+    // Native view may already be detached during teardown.
+  }
+}
+
+function applyWebTabVisibility() {
+  for (const record of webTabs.values()) {
+    if (record.id === activeWebTabId) record.view.setBounds(record.bounds);
+    else hideWebTab(record);
+  }
+}
+
+function createWebTabView(id: string, initialUrl: string): WebContentsView {
+  const view = new WebContentsView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      // Remix currently depends on browser APIs that can stall under Electron's strict sandboxed WebContentsView mode.
+      // Keep Node disabled and context isolation/webSecurity enabled; do not expose a preload to remote pages.
+      sandbox: false,
+      webSecurity: true,
+      backgroundThrottling: false,
+      partition: WEB_TAB_PARTITION,
+      transparent: false,
+      spellcheck: false
+    }
+  });
+  const contents = view.webContents;
+  contents.userAgent = WEB_TAB_USER_AGENT;
+  contents.on('before-input-event', (event, input) => {
+    const action = getZoomAction(input);
+    if (!action) return;
+    event.preventDefault();
+    adjustWebTabZoom(id, action);
+  });
+  contents.setWindowOpenHandler(({ url }) => {
+    const normalized = normalizeInternalWebUrl(url);
+    if (normalized) {
+      void createOrFocusWebTab(normalized, true);
+    }
+    return { action: 'deny' };
+  });
+  contents.on('will-navigate', (event, url) => {
+    const normalized = normalizeInternalWebUrl(url);
+    if (!normalized) {
+      event.preventDefault();
+      return;
+    }
+  });
+  contents.on('did-start-loading', () => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { loading: true });
+  });
+  contents.on('did-stop-loading', () => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { loading: false, canGoBack: contents.canGoBack(), canGoForward: contents.canGoForward() });
+  });
+  contents.on('page-title-updated', (_event, title) => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { title });
+  });
+  contents.on('did-navigate', (_event, url) => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { url, title: contents.getTitle() || url, canGoBack: contents.canGoBack(), canGoForward: contents.canGoForward() });
+  });
+  contents.on('did-navigate-in-page', (_event, url) => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { url, title: contents.getTitle() || url, canGoBack: contents.canGoBack(), canGoForward: contents.canGoForward() });
+  });
+  contents.on('did-fail-load', (_event, _code, description, url) => {
+    const record = webTabs.get(id);
+    if (record) setWebTabState(record, { loading: false, url: url || record.state.url, title: description || record.state.title });
+  });
+  void contents.loadURL(initialUrl, { userAgent: WEB_TAB_USER_AGENT });
+  return view;
+}
+
+async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting = false): Promise<WebTabResult> {
+  if (!editWindow || editWindow.isDestroyed()) return { success: false, message: 'Editor window is not available.' };
+  const normalized = normalizeInternalWebUrl(inputUrl);
+  if (!normalized) return { success: false, message: 'Only http/https URLs can be opened in MarkFlow tabs.' };
+
+  const existing = reuseExisting ? [...webTabs.values()].find((tab) => tab.state.url === normalized) : null;
+  if (existing) {
+    if (focus) activeWebTabId = existing.id;
+    applyWebTabVisibility();
+    sendWebTabsChanged();
+    return { success: true, tab: cloneWebTabState(existing.state) };
+  }
+
+  const id = crypto.randomUUID();
+  const view = createWebTabView(id, normalized);
+  const record: WebTabRecord = {
+    id,
+    view,
+    bounds: { x: -10000, y: -10000, width: 1, height: 1 },
+    state: {
+      id,
+      url: normalized,
+      title: new URL(normalized).hostname || normalized,
+      loading: true,
+      canGoBack: false,
+      canGoForward: false,
+      zoomFactor: DEFAULT_WEB_TAB_ZOOM_FACTOR
+    }
+  };
+  webTabs.set(id, record);
+  view.webContents.zoomFactor = record.state.zoomFactor;
+  editWindow.contentView.addChildView(view);
+  if (focus) activeWebTabId = id;
+  applyWebTabVisibility();
+  sendWebTabsChanged();
+  return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+function closeWebTab(id: string): WebTabResult {
+  const record = webTabs.get(id);
+  if (!record) return { success: false, message: 'Web tab not found.' };
+  try {
+    editWindow?.contentView.removeChildView(record.view);
+    record.view.webContents.close({ waitForBeforeUnload: false });
+  } catch {
+    // Closing a partially torn-down tab should not break app shutdown.
+  }
+  webTabs.delete(id);
+  if (activeWebTabId === id) activeWebTabId = null;
+  applyWebTabVisibility();
+  sendWebTabsChanged();
+  return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+function focusWebTab(id: string | null): WebTabResult {
+  if (id !== null && !webTabs.has(id)) return { success: false, message: 'Web tab not found.' };
+  activeWebTabId = id;
+  applyWebTabVisibility();
+  sendWebTabsChanged();
+  const tab = id ? webTabs.get(id) : null;
+  return { success: true, tab: tab ? cloneWebTabState(tab.state) : { id: 'markdown', url: '', title: 'Markdown', loading: false, canGoBack: false, canGoForward: false, zoomFactor: DEFAULT_WEB_TAB_ZOOM_FACTOR } };
+}
+
+function navigateWebTab(id: string, inputUrl: string): WebTabResult {
+  const record = webTabs.get(id);
+  if (!record) return { success: false, message: 'Web tab not found.' };
+  const normalized = normalizeInternalWebUrl(inputUrl);
+  if (!normalized) return { success: false, message: 'Only http/https URLs can be opened in MarkFlow tabs.' };
+  setWebTabState(record, { url: normalized, loading: true, title: new URL(normalized).hostname || normalized });
+  void record.view.webContents.loadURL(normalized, { userAgent: WEB_TAB_USER_AGENT });
+  return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+function setWebTabBounds(id: string, bounds: Partial<Rectangle>): WebTabResult {
+  const record = webTabs.get(id);
+  if (!record) return { success: false, message: 'Web tab not found.' };
+  const safeBounds: Rectangle = {
+    x: Math.max(0, Math.round(Number(bounds.x) || 0)),
+    y: Math.max(0, Math.round(Number(bounds.y) || 0)),
+    width: Math.max(1, Math.round(Number(bounds.width) || 1)),
+    height: Math.max(1, Math.round(Number(bounds.height) || 1))
+  };
+  record.bounds = safeBounds;
+  if (activeWebTabId === id) record.view.setBounds(safeBounds);
+  return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+function setWebTabZoom(id: string, inputZoomFactor: number): WebTabResult {
+  const record = webTabs.get(id);
+  if (!record) return { success: false, message: 'Web tab not found.' };
+  const zoomFactor = clampWebTabZoomFactor(inputZoomFactor);
+  record.view.webContents.zoomFactor = zoomFactor;
+  setWebTabState(record, { zoomFactor });
+  return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+function adjustWebTabZoom(id: string, action: ZoomAction): WebTabResult {
+  const record = webTabs.get(id);
+  if (!record) return { success: false, message: 'Web tab not found.' };
+  const nextZoomFactor =
+    action === 'reset'
+      ? DEFAULT_WEB_TAB_ZOOM_FACTOR
+      : record.state.zoomFactor + (action === 'in' ? WEB_TAB_ZOOM_STEP : -WEB_TAB_ZOOM_STEP);
+  return setWebTabZoom(id, nextZoomFactor);
+}
+
+function destroyAllWebTabs() {
+  for (const record of webTabs.values()) {
+    try {
+      editWindow?.contentView.removeChildView(record.view);
+      record.view.webContents.close({ waitForBeforeUnload: false });
+    } catch {
+      // Ignore teardown races.
+    }
+  }
+  webTabs.clear();
+  activeWebTabId = null;
 }
 
 
@@ -731,11 +1014,15 @@ function createEditWindow() {
     syncDockedNotesWindow();
   };
   editWindow.on('move', syncNotes);
-  editWindow.on('resize', syncNotes);
+  editWindow.on('resize', () => {
+    syncNotes();
+    applyWebTabVisibility();
+  });
   editWindow.on('closed', () => {
     notesWindow?.close();
     notesWindow = null;
     notesDockState = null;
+    destroyAllWebTabs();
     editWindow = null;
   });
 }
@@ -913,6 +1200,20 @@ function registerMarkdownAssetProtocol(targetProtocol: Protocol = protocol) {
   targetProtocol.handle(MARKFLOW_ASSET_PROTOCOL, handleMarkdownAssetRequest);
 }
 
+function configureWebTabSession() {
+  const webSession = session.fromPartition(WEB_TAB_PARTITION);
+  webSession.setUserAgent(WEB_TAB_USER_AGENT);
+  webSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'fullscreen' || permission === 'pointerLock' || permission === 'clipboard-read' || permission === 'clipboard-sanitized-write');
+  });
+  webSession.setPermissionCheckHandler((_webContents, permission) => (
+    permission === 'fullscreen' ||
+    permission === 'pointerLock' ||
+    permission === 'clipboard-read' ||
+    permission === 'clipboard-sanitized-write'
+  ));
+}
+
 function waitForPrintRender(window: BrowserWindow, payload: { markdown: string; docPath: string | null }): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -975,6 +1276,7 @@ async function renderMarkdownPdf(markdown: string, docPath: string | null): Prom
 
 app.whenReady().then(async () => {
   registerMarkdownAssetProtocol();
+  configureWebTabSession();
   setPendingOpenPath(extractMarkdownPathFromArgv(process.argv.slice(1)));
   createEditWindow();
 
@@ -1088,6 +1390,50 @@ app.whenReady().then(async () => {
   ipcMain.handle('quickOpen:set', async (_evt, args: unknown) => updateQuickOpenUrl(args));
 
   ipcMain.handle('asset:resolveImageUrl', async (_evt, args: unknown) => resolveMarkdownImageUrlForRenderer(args));
+
+  ipcMain.handle('webTab:list', async (event): Promise<WebTabListResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    return { success: true, tabs: webTabStates() };
+  });
+
+  ipcMain.handle('webTab:create', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    return createOrFocusWebTab(getStringField(args, 'url') ?? '', true, isRecord(args) && args.reuseExisting === true);
+  });
+
+  ipcMain.handle('webTab:focus', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    return focusWebTab(getNullableStringField(args, 'id'));
+  });
+
+  ipcMain.handle('webTab:close', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    return closeWebTab(getStringField(args, 'id') ?? '');
+  });
+
+  ipcMain.handle('webTab:navigate', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    return navigateWebTab(getStringField(args, 'id') ?? '', getStringField(args, 'url') ?? '');
+  });
+
+  ipcMain.handle('webTab:setBounds', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    if (!isRecord(args)) return { success: false, message: 'Invalid bounds.' };
+    return setWebTabBounds(getStringField(args, 'id') ?? '', args);
+  });
+
+  ipcMain.handle('webTab:setZoom', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    if (!isRecord(args)) return { success: false, message: 'Invalid zoom.' };
+    return setWebTabZoom(getStringField(args, 'id') ?? '', Number(args.zoomFactor));
+  });
+
+  ipcMain.handle('webTab:adjustZoom', async (event, args: unknown): Promise<WebTabResult> => {
+    if (!isTrustedEditSender(event)) return { success: false, message: 'Unauthorized web tab request.' };
+    const action = getStringField(args, 'action');
+    if (action !== 'in' && action !== 'out' && action !== 'reset') return { success: false, message: 'Invalid zoom action.' };
+    return adjustWebTabZoom(getStringField(args, 'id') ?? '', action);
+  });
 
   ipcMain.handle('export:pdf', async (_evt, args: unknown) => {
     const { dialog } = await import('electron');
