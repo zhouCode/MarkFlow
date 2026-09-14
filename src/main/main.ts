@@ -126,7 +126,7 @@ const DEFAULT_NOTES_SETTINGS: NotesWindowSettings = {
 };
 const DEFAULT_NOTES_WIDTH = 210;
 const DEFAULT_NOTES_HEIGHT = 760;
-const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
+const DEFAULT_QUICK_OPEN_URL = 'https://app.remix.live/';
 const WEB_TAB_PARTITION = 'persist:markflow-web-tabs';
 const WEB_TAB_ZOOM_STEP = 0.1;
 const WEB_TAB_ZOOM_MIN = 0.5;

@@ -32,7 +32,7 @@ type BlockMetric = {
 };
 
 
-const DEFAULT_QUICK_OPEN_URL = 'https://remix.ethereum.org/';
+const DEFAULT_QUICK_OPEN_URL = 'https://app.remix.live/';
 
 type MenuKind = 'function' | 'edit' | null;
 
@@ -742,6 +742,10 @@ export function EditView() {
   const [downloadProgress, setDownloadProgress] = React.useState(0);
   const [appInfo, setAppInfo] = React.useState<AppInfo | null>(null);
   const [aboutOpen, setAboutOpen] = React.useState(false);
+  const [remixSettingsOpen, setRemixSettingsOpen] = React.useState(false);
+  const [remixSettingsDraft, setRemixSettingsDraft] = React.useState('');
+  const [remixSettingsError, setRemixSettingsError] = React.useState('');
+  const [remixSettingsSaving, setRemixSettingsSaving] = React.useState(false);
   const [quickOpenUrl, setQuickOpenUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
   const [quickOpenDraftUrl, setQuickOpenDraftUrl] = React.useState(DEFAULT_QUICK_OPEN_URL);
   const [webTabs, setWebTabs] = React.useState<WebTabState[]>([]);
@@ -936,22 +940,24 @@ export function EditView() {
   }, [openInternalWebTab, quickOpenUrl, showToast]);
 
   const handleQuickOpenSave = React.useCallback(async () => {
-    const normalized = normalizeExternalHttpUrl(quickOpenDraftUrl);
+    const normalized = normalizeExternalHttpUrl(remixSettingsDraft);
     if (!normalized) {
-      showToast({ kind: 'error', text: 'Enter a valid http or https URL.' });
-      setQuickOpenDraftUrl(quickOpenUrl);
+      setRemixSettingsError('请输入有效的 http 或 https 地址。');
       return;
     }
+    setRemixSettingsSaving(true);
     try {
       const saved = await window.markflow.quickOpenSet({ url: normalized });
       setQuickOpenUrl(saved.url);
       setQuickOpenDraftUrl(saved.url);
-      showToast({ kind: 'info', text: 'Quick-open URL saved.' });
+      setRemixSettingsOpen(false);
+      showToast({ kind: 'info', text: '默认 URL已保存。' });
     } catch (error) {
-      showToast({ kind: 'error', text: error instanceof Error ? error.message : 'Unable to save quick-open URL.' });
-      setQuickOpenDraftUrl(quickOpenUrl);
+      setRemixSettingsError(error instanceof Error ? error.message : '保存地址失败。');
+    } finally {
+      setRemixSettingsSaving(false);
     }
-  }, [quickOpenDraftUrl, quickOpenUrl, showToast]);
+  }, [remixSettingsDraft, showToast]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -1009,7 +1015,7 @@ export function EditView() {
   }, []);
 
   React.useEffect(() => {
-    if (activeTabId === 'markdown') {
+    if (activeTabId === 'markdown' || remixSettingsOpen || aboutOpen) {
       void window.markflow.webTabFocus({ id: null });
       return;
     }
@@ -1025,7 +1031,7 @@ export function EditView() {
       window.removeEventListener('resize', onResize);
       observer?.disconnect();
     };
-  }, [activeTabId, syncActiveWebTabBounds]);
+  }, [activeTabId, syncActiveWebTabBounds, remixSettingsOpen, aboutOpen]);
 
   React.useLayoutEffect(() => {
     if (activeTabId === 'markdown') return;
@@ -1847,6 +1853,11 @@ export function EditView() {
               {menuItem('Switch to Markdown', shortcut('mod', '1'), () => setActiveTabId('markdown'))}
               {menuItem('Switch to Web', shortcut('mod', '2'), focusFirstWebTab)}
               {menuItem('Open Remix', shortcut('shift', 'mod', 'R'), () => void handleQuickOpen())}
+              {menuItem('默认url设置', '', () => {
+                setRemixSettingsDraft(quickOpenUrl);
+                setRemixSettingsError('');
+                setRemixSettingsOpen(true);
+              })}
               {menuItem('Focus Address', shortcut('mod', 'L'), focusAddressBar)}
               {menuItem('Close Web Tab', shortcut('mod', 'W'), closeCurrentWebTab, activeTabId === 'markdown')}
               {menuItem('Toggle Files', '', () => setSidebarOpen((open) => !open))}
@@ -1940,14 +1951,13 @@ export function EditView() {
             else setAddressDraft(event.target.value);
           }}
           onBlur={() => {
-            if (activeTabId === 'markdown') void handleQuickOpenSave();
-            else syncActiveWebTabBounds();
+            if (activeTabId !== 'markdown') syncActiveWebTabBounds();
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
               if (activeTabId === 'markdown') {
-                void handleQuickOpenSave().then(() => handleQuickOpen());
+                void openInternalWebTab(quickOpenDraftUrl);
               } else {
                 void navigateActiveWebTab();
               }
@@ -1959,13 +1969,44 @@ export function EditView() {
           className="btn btnPrimary"
           title={activeTabId === 'markdown' ? 'Open URL in new tab' : 'Navigate current tab'}
           onClick={() => {
-            if (activeTabId === 'markdown') void handleQuickOpen();
+            if (activeTabId === 'markdown') void openInternalWebTab(quickOpenDraftUrl);
             else void navigateActiveWebTab();
           }}
         >
           {activeTabId === 'markdown' ? 'New Tab' : 'Open'}
         </button>
       </div>
+
+      {remixSettingsOpen ? (
+        <div className="aboutOverlay" onClick={() => { if (!remixSettingsSaving) setRemixSettingsOpen(false); }}>
+          <form className="aboutPanel remixSettingsPanel" role="dialog" aria-modal="true" aria-labelledby="remixSettingsTitle"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') { event.stopPropagation(); if (!remixSettingsSaving) setRemixSettingsOpen(false); }
+            }}
+            onSubmit={(event) => { event.preventDefault(); void handleQuickOpenSave(); }}>
+            <div className="aboutHeader">
+              <div className="aboutTitle" id="remixSettingsTitle">默认url设置</div>
+              <button className="btn" type="button" disabled={remixSettingsSaving} onClick={() => setRemixSettingsOpen(false)}>取消</button>
+            </div>
+            <div className="aboutBody">
+              <label htmlFor="remixDefaultUrl">默认 URL</label>
+              <input id="remixDefaultUrl" className="quickOpenInput" autoFocus style={{ width: '100%', boxSizing: 'border-box' }}
+                value={remixSettingsDraft} disabled={remixSettingsSaving}
+                onChange={(event) => { setRemixSettingsDraft(event.target.value); setRemixSettingsError(''); }} />
+              <p>“Open Remix”和 Ctrl/Cmd+Shift+R 使用此地址。已有标签页保持原地址，工作区文件需要在 Remix 中另行迁移。</p>
+              {remixSettingsError ? <p role="alert">{remixSettingsError}</p> : null}
+              <div className="toolbarGroup">
+                <button className="btn" type="button" disabled={remixSettingsSaving} onClick={() => {
+                  setRemixSettingsDraft(DEFAULT_QUICK_OPEN_URL);
+                  setRemixSettingsError('');
+                }}>恢复默认</button>
+                <button className="btn btnPrimary" type="submit" disabled={remixSettingsSaving}>{remixSettingsSaving ? '保存中…' : '保存'}</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      ) : null}
 
       {aboutOpen ? (
         <div className="aboutOverlay" onClick={() => setAboutOpen(false)}>

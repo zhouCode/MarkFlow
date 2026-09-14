@@ -1611,3 +1611,7 @@ body {
 .compactChrome.menuOpen {
   z-index: 100;
 }
+
+.remixSettingsPanel .aboutBody { padding: 16px; gap: 12px; }
+.remixSettingsPanel p { margin: 0; font-size: 13px; line-height: 1.6; }
+.remixSettingsPanel [role="alert"] { color: var(--danger, #d33); }

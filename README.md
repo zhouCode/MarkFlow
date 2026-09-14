@@ -19,7 +19,7 @@ MarkFlow is an Electron Markdown editor designed for teaching and live walkthrou
 ## Classroom workflow
 
 1. Open your Markdown lesson document.
-2. Use **New Tab** or `Ctrl/Cmd+Shift+R` to open Remix inside MarkFlow.
+2. Use **Function → Open Remix** or `Ctrl/Cmd+Shift+R` to open Remix inside MarkFlow. Set its saved URL under **Function → 默认url设置**; **恢复默认** selects `https://app.remix.live/` (click **保存** to apply). The address bar and **New Tab** open a one-off URL without changing this setting. Existing saved addresses and open tabs are preserved; migrate Remix workspaces separately when changing sites.
 3. Switch between the lesson and Remix with `Ctrl/Cmd+1` / `Ctrl/Cmd+2`.
 4. Use `Ctrl/Cmd +/-/0` to zoom the active Markdown or web content for screen sharing.
 5. Enable **Present** mode when you want read-oriented classroom interaction.

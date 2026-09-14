@@ -301,6 +301,44 @@ async function selectAlpha() {
       await webKey(url, 'w');
       await page.waitForFunction(async () => (await window.markflow.webTabList()).tabs.length === 0);
     });
+    await test('Remix settings validate, reset, persist and drive the shortcut without navigating existing tabs', async () => {
+      await open();
+      assert.equal((await page.evaluate(() => window.markflow.quickOpenGet())).url, 'https://app.remix.live/');
+      const showSettings = async () => {
+        await page.getByRole('button', { name: '☰ Function', exact: true }).click();
+        await page.getByRole('button', { name: '默认url设置', exact: true }).click();
+      };
+      await showSettings();
+      await page.getByLabel('默认 URL').fill('javascript:alert(1)');
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.getByRole('alert').waitFor();
+      assert.equal((await page.evaluate(() => window.markflow.quickOpenGet())).url, 'https://app.remix.live/');
+      await page.getByRole('button', { name: '恢复默认', exact: true }).click();
+      assert.equal(await page.getByLabel('默认 URL').inputValue(), 'https://app.remix.live/');
+      await page.getByLabel('默认 URL').fill(url + 'custom');
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
+      await press('Control+Shift+r');
+      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(t => t.url === expected), url + 'custom');
+      await showSettings();
+      await page.screenshot({ path: path.join(output, 'remix-settings.png') });
+      await page.getByRole('button', { name: '恢复默认', exact: true }).click();
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs[0].url, url + 'custom');
+      await showSettings();
+      await page.getByLabel('默认 URL').fill(url + 'persisted');
+      await page.getByRole('button', { name: '保存', exact: true }).click();
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
+      for (const tab of (await page.evaluate(() => window.markflow.webTabList())).tabs) {
+        await page.evaluate(id => window.markflow.webTabClose({ id }), tab.id);
+      }
+      await open();
+      await page.getByRole('textbox', { name: 'Quick-open URL', exact: true }).fill(url + 'typed');
+      await press('Enter');
+      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(t => t.url === expected), url + 'typed');
+      assert.equal((await page.evaluate(() => window.markflow.quickOpenGet())).url, url + 'persisted');
+    });
     await test('PDF export includes local images and excludes teacher notes', async () => {
       await open();
       const pdf = path.join(scratch, 'lesson.pdf');
@@ -330,6 +368,7 @@ async function selectAlpha() {
       await app.close(); await launch();
       await page.waitForFunction(text => document.querySelector('.cm-content').cmTile.view.state.doc.toString() === text, fs.readFileSync(other, 'utf8'));
       assert.equal((await page.evaluate(() => window.markflow.workspaceStateGet())).dirPath, scratch);
+      assert.equal((await page.evaluate(() => window.markflow.quickOpenGet())).url, url + 'persisted');
     });
     await test('No renderer exceptions', async () => assert.deepEqual(errors, []));
     await page.screenshot({ path: path.join(output, 'smoke-final.png') });
