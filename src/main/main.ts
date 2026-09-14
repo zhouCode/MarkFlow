@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, ipcMain, protocol, screen, session, shell } from 'electron';
+import { app, BrowserWindow, WebContentsView, dialog, ipcMain, protocol, screen, session, shell } from 'electron';
 import type { Input, IpcMainInvokeEvent, Protocol, Rectangle } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
@@ -157,11 +157,16 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let editWindow: BrowserWindow | null = null;
+let editRendererReady = false;
 let notesWindow: BrowserWindow | null = null;
 
 let currentDocPath: string | null = null;
 let currentWorkspaceDirPath: string | null = null;
 let currentMarkdown = '';
+let savedMarkdown = '';
+let allowEditorClose = false;
+let quitRequested = false;
+let closeConfirmation: Promise<boolean> | null = null;
 let editContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 let notesContentZoom = DEFAULT_EDIT_CONTENT_ZOOM.scale;
 let notesSettings: NotesWindowSettings = { ...DEFAULT_NOTES_SETTINGS };
@@ -272,6 +277,23 @@ function createWebTabView(id: string, initialUrl: string): WebContentsView {
   const contents = view.webContents;
   contents.userAgent = WEB_TAB_USER_AGENT;
   contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.key.toLowerCase();
+    const mod = input.control || input.meta;
+    const appShortcut =
+      (mod && !input.alt && !input.shift && ['1', '2', 'l', 'w', ','].includes(key)) ||
+      (mod && !input.alt && input.shift && ['r', 'p'].includes(key)) ||
+      (!mod && input.alt && ['m', 'e'].includes(key)) ||
+      key === 'f5';
+    if (appShortcut) {
+      event.preventDefault();
+      editWindow?.webContents.focus();
+      editWindow?.webContents.send('app:shortcut', {
+        key: input.key, code: input.code, ctrlKey: input.control, metaKey: input.meta,
+        shiftKey: input.shift, altKey: input.alt
+      });
+      return;
+    }
     const action = getZoomAction(input);
     if (!action) return;
     event.preventDefault();
@@ -377,6 +399,7 @@ function focusWebTab(id: string | null): WebTabResult {
   if (id !== null && !webTabs.has(id)) return { success: false, message: 'Web tab not found.' };
   activeWebTabId = id;
   applyWebTabVisibility();
+  if (id === null) editWindow?.webContents.focus();
   sendWebTabsChanged();
   const tab = id ? webTabs.get(id) : null;
   return { success: true, tab: tab ? cloneWebTabState(tab.state) : { id: 'markdown', url: '', title: 'Markdown', loading: false, canGoBack: false, canGoForward: false, zoomFactor: DEFAULT_WEB_TAB_ZOOM_FACTOR } };
@@ -523,6 +546,7 @@ async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
   currentDocPath = filePath;
   currentMarkdown = markdown;
+  savedMarkdown = markdown;
   await writeCurrentPersistedState({ lastDocPath: filePath });
   return { docPath: currentDocPath, markdown: currentMarkdown };
 }
@@ -575,7 +599,7 @@ async function loadDocumentIntoWindows(filePath: string) {
 }
 
 function isRendererReady(window: BrowserWindow | null): boolean {
-  return Boolean(window && !window.webContents.isLoadingMainFrame());
+  return Boolean(window && editRendererReady && !window.webContents.isLoadingMainFrame());
 }
 
 async function openPendingDocumentIfAny() {
@@ -979,6 +1003,8 @@ function defaultNotesPlacement(): CompanionPlacement {
 }
 
 function createEditWindow() {
+  editRendererReady = false;
+  allowEditorClose = false;
   editWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -1018,6 +1044,20 @@ function createEditWindow() {
     syncNotes();
     applyWebTabVisibility();
   });
+  let closing = false;
+  editWindow.on('close', (event) => {
+    if (allowEditorClose || !editRendererReady) return;
+    event.preventDefault();
+    if (closing) return;
+    closing = true;
+    void confirmEditorClose().then((approved) => {
+      closing = false;
+      if (!approved) { quitRequested = false; return; }
+      allowEditorClose = true;
+      if (quitRequested) app.quit();
+      else editWindow?.close();
+    });
+  });
   editWindow.on('closed', () => {
     notesWindow?.close();
     notesWindow = null;
@@ -1025,6 +1065,73 @@ function createEditWindow() {
     destroyAllWebTabs();
     editWindow = null;
   });
+}
+
+async function saveDocument(docPath: string | null, markdown: string) {
+  const window = editWindow;
+  if (!window) return null;
+  let filePath = docPath;
+  if (!filePath) {
+    const result = await dialog.showSaveDialog(window, {
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    });
+    if (result.canceled || !result.filePath) return null;
+    filePath = result.filePath;
+  }
+  await fs.writeFile(filePath, markdown, 'utf-8');
+  // A save can finish after further typing or a document switch.
+  if (currentDocPath === docPath) {
+    currentDocPath = filePath;
+    savedMarkdown = markdown;
+    await writeCurrentPersistedState({ lastDocPath: filePath });
+    if (!window.isDestroyed()) window.webContents.send('doc:saved', { docPath: filePath, markdown });
+  }
+  return { docPath: filePath };
+}
+
+function readCloseSnapshot(window: BrowserWindow): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+    const cleanup = () => { clearTimeout(timer); ipcMain.removeListener('doc:closeSnapshot', onSnapshot); };
+    const onSnapshot = (event: Electron.IpcMainEvent, input: unknown) => {
+      if (event.sender !== window.webContents || !isRecord(input) || input.requestId !== requestId || typeof input.markdown !== 'string') return;
+      cleanup();
+      resolve(input.markdown);
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error('编辑器暂时没有响应，请稍后重试关闭。')); }, 5000);
+    ipcMain.on('doc:closeSnapshot', onSnapshot);
+    window.webContents.send('doc:requestCloseSnapshot', { requestId });
+  });
+}
+
+function confirmEditorClose(): Promise<boolean> {
+  if (closeConfirmation) return closeConfirmation;
+  closeConfirmation = (async () => {
+    const window = editWindow;
+    if (!window || window.isDestroyed() || !editRendererReady) return true;
+    try {
+      const markdown = await readCloseSnapshot(window);
+      const docPath = currentDocPath;
+      currentMarkdown = markdown;
+      if (markdown === savedMarkdown) return true;
+      const { response } = await dialog.showMessageBox(window, {
+        type: 'warning', title: '未保存的修改',
+        message: `是否保存对“${docPath ? path.basename(docPath) : '未命名文档'}”的修改？`,
+        detail: '选择“放弃修改”后，未保存的内容将会丢失。',
+        buttons: ['保存', '放弃修改', '取消'], defaultId: 0, cancelId: 2, noLink: true
+      });
+      if (response === 2) return false;
+      if (response === 0 && !(await saveDocument(docPath, markdown))) return false;
+      return currentMarkdown === markdown && (response === 1 || savedMarkdown === markdown);
+    } catch (error) {
+      if (!window.isDestroyed()) await dialog.showMessageBox(window, {
+        type: 'error', title: '无法关闭文档', message: '文档未关闭，修改已保留。',
+        detail: error instanceof Error ? error.message : String(error), buttons: ['确定']
+      });
+      return false;
+    }
+  })().finally(() => { closeConfirmation = null; });
+  return closeConfirmation;
 }
 
 function forwardToNotes(channel: string, payload: unknown) {
@@ -1278,12 +1385,6 @@ app.whenReady().then(async () => {
   registerMarkdownAssetProtocol();
   configureWebTabSession();
   setPendingOpenPath(extractMarkdownPathFromArgv(process.argv.slice(1)));
-  createEditWindow();
-
-  if (pendingOpenState.filePath) {
-    return;
-  }
-
   const persisted = await readPersistedState();
   currentWorkspaceDirPath = persisted.lastWorkspaceDirPath ? path.resolve(persisted.lastWorkspaceDirPath) : null;
   notesSettings = persisted.notesSettings;
@@ -1291,16 +1392,15 @@ app.whenReady().then(async () => {
   if (notesSettings.syncZoomWithEdit) {
     notesContentZoom = editContentZoom;
   }
-  if (persisted.lastDocPath) {
+  if (!pendingOpenState.filePath && persisted.lastDocPath) {
     try {
-      const restored = await loadDocument(persisted.lastDocPath);
-      editWindow?.webContents.once('did-finish-load', () => {
-        editWindow?.webContents.send('doc:update', restored);
-      });
+      await fs.access(persisted.lastDocPath);
+      setPendingOpenPath(persisted.lastDocPath);
     } catch {
       await writeCurrentPersistedState({ lastDocPath: null });
     }
   }
+  createEditWindow();
 
   ipcMain.handle('doc:open', async () => {
     const { dialog } = await import('electron');
@@ -1314,6 +1414,19 @@ app.whenReady().then(async () => {
     return loadDocumentIntoWindows(filePath);
   });
 
+  ipcMain.on('doc:ready', (event) => {
+    if (event.sender !== editWindow?.webContents) return;
+    editRendererReady = true;
+    if (pendingOpenState.filePath) void openPendingDocumentIfAny();
+    else event.sender.send('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
+  });
+
+  ipcMain.on('notes:ready', (event) => {
+    if (event.sender !== notesWindow?.webContents) return;
+    event.sender.send('contentZoom:update', notesContentZoomState());
+    if (currentNotesState) event.sender.send('notes:update', currentNotesState);
+  });
+
   ipcMain.handle('doc:openPath', async (_evt, args: { filePath: string }) => {
     if (!looksLikeMarkdownPath(args.filePath)) {
       throw new Error('Only Markdown files can be opened in the editor.');
@@ -1322,22 +1435,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('doc:save', async (_evt, args: { docPath: string | null; markdown: string }) => {
-    const { dialog } = await import('electron');
-    if (!editWindow) return null;
-    let filePath = args.docPath ?? null;
-    if (!filePath) {
-      const res = await dialog.showSaveDialog(editWindow, {
-        filters: [{ name: 'Markdown', extensions: ['md'] }]
-      });
-      if (res.canceled || !res.filePath) return null;
-      filePath = res.filePath;
-    }
-    await fs.writeFile(filePath, args.markdown, 'utf-8');
-    currentDocPath = filePath;
-    currentMarkdown = args.markdown;
-    await writeCurrentPersistedState({ lastDocPath: filePath });
-    editWindow.webContents.send('doc:saved', { docPath: currentDocPath });
-    return { docPath: currentDocPath };
+    return saveDocument(args.docPath, args.markdown);
   });
 
   ipcMain.handle('folder:open', async () => {
@@ -1579,8 +1677,13 @@ ipcMain.handle('update:download', async () => {
   }
 });
 
-ipcMain.handle('update:install', () => {
+ipcMain.handle('update:install', async () => {
+  if (!(await confirmEditorClose())) return false;
+  allowEditorClose = true;
+  // Failed installation leaves the app running; the next close must still be guarded.
+  autoUpdater.once('error', () => { allowEditorClose = false; });
   autoUpdater.quitAndInstall(false, true);
+  return true;
 });
 
 ipcMain.handle('app:info', async (): Promise<AppInfo> => ({
@@ -1603,6 +1706,8 @@ autoUpdater.on('download-progress', (progress) => {
   };
   editWindow?.webContents.send('update:download-progress', payload);
 });
+
+app.on('before-quit', () => { quitRequested = true; });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

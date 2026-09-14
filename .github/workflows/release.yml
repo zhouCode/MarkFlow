@@ -25,7 +25,11 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run build
+      - name: Test Electron classroom and close flows
+        if: runner.os == 'Windows'
+        run: node scripts/electron-smoke.cjs
       - run: npx electron-builder --publish never
 
       - name: Normalize Windows updater asset names

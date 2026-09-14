@@ -1,10 +1,11 @@
 {
   "name": "markflow",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": true,
   "description": "Markdown editor with a private notes workspace and dockable native notes companion window.",
   "main": "dist/main/main.js",
   "scripts": {
+    "test:smoke": "npm run build && node scripts/electron-smoke.cjs",
     "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.main.json --watch\" \"tsc -p tsconfig.preload.json --watch\" \"wait-on dist/main/main.js dist/preload/preload.js http://localhost:5173 && electron dist/main/main.js\"",
     "build": "vite build && tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json",
     "dist": "npm run build && electron-builder --publish never",
@@ -55,8 +56,8 @@
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
-    "@codemirror/search": "^6.6.0",
     "@codemirror/language": "^6.11.3",
+    "@codemirror/search": "^6.6.0",
     "@codemirror/state": "^6.5.2",
     "@codemirror/theme-one-dark": "^6.1.2",
     "@codemirror/view": "^6.38.1",
@@ -86,6 +87,7 @@
     "concurrently": "^9.0.1",
     "electron": "^31.4.0",
     "electron-builder": "^26.0.12",
+    "playwright": "^1.63.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.2",
     "wait-on": "^7.2.0"

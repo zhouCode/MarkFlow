@@ -3,10 +3,11 @@ import CodeMirror from '@uiw/react-codemirror';
 import { markdown as mdLang } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { Decoration, EditorView, keymap, ViewPlugin, type DecorationSet, type ViewUpdate } from '@codemirror/view';
-import { Compartment, type EditorState, type Extension, type Range } from '@codemirror/state';
+import { Compartment, EditorState, StateEffect, type Extension, type Range } from '@codemirror/state';
 import { history, historyKeymap, redo, undo } from '@codemirror/commands';
 import {
   openSearchPanel,
+  closeSearchPanel,
   search,
   searchKeymap,
   setSearchQuery,
@@ -43,6 +44,7 @@ type ToastMessage = {
 type AppTab = { id: 'markdown'; kind: 'markdown'; title: string } | { id: string; kind: 'web'; title: string; url: string };
 
 const editorEditableCompartment = new Compartment();
+const showReplacePanel = StateEffect.define<boolean>();
 
 
 function createExpandableSearchPanel(view: EditorView) {
@@ -114,13 +116,22 @@ function createExpandableSearchPanel(view: EditorView) {
     }
   };
   expandButton.onclick = () => setExpanded(!expanded);
+  dom.onkeydown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSearchPanel(view);
+      view.focus();
+    }
+  };
 
   dom.append(
     expandButton,
     searchField,
     button('next', 'next', () => findNext(view)),
     button('prev', 'previous', () => findPrevious(view)),
-    button('select', 'all', () => selectMatches(view))
+    button('select', 'all', () => selectMatches(view)),
+    button('close', 'close', () => { closeSearchPanel(view); view.focus(); })
   );
   replaceRow.append(
     replaceField,
@@ -131,6 +142,12 @@ function createExpandableSearchPanel(view: EditorView) {
 
   setExpanded(false);
 
+  const syncReadOnly = () => {
+    replaceField.disabled = view.state.readOnly;
+    replaceRow.querySelectorAll('button').forEach((el) => { el.disabled = view.state.readOnly; });
+  };
+  syncReadOnly();
+
   return {
     dom,
     top: true,
@@ -138,8 +155,13 @@ function createExpandableSearchPanel(view: EditorView) {
       searchField.focus();
       searchField.select();
     },
-    update() {
-      // The panel owns query updates through its inputs; external query updates are rare here.
+    update(update: ViewUpdate) {
+      syncReadOnly();
+      for (const transaction of update.transactions) {
+        for (const effect of transaction.effects) {
+          if (effect.is(showReplacePanel)) setExpanded(effect.value);
+        }
+      }
     }
   };
 }
@@ -696,6 +718,7 @@ function isPathInsideDir(filePath: string, dirPath: string): boolean {
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
+  const [documentRevision, setDocumentRevision] = React.useState(0);
   const [markdown, setMarkdown] = React.useState('');
   const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState('');
   const [workspaceDirPath, setWorkspaceDirPath] = React.useState<string | null>(null);
@@ -761,19 +784,23 @@ export function EditView() {
   }, [notesWindowOpen]);
 
   React.useEffect(() => {
+    const offCloseSnapshot = window.markflow.onCloseSnapshotRequested(() => markdownRef.current);
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
+      markdownRef.current = payload.markdown;
+      setDocumentRevision((value) => value + 1);
       setDocPath(payload.docPath);
       setMarkdown(payload.markdown);
       setLastSavedMarkdown(payload.markdown);
     });
     const offDocSaved = window.markflow.onDocSaved((payload) => {
       setDocPath(payload.docPath);
-      setLastSavedMarkdown(markdownRef.current);
+      setLastSavedMarkdown(payload.markdown);
     });
     const offZoom = window.markflow.onContentZoomUpdate((payload) => {
       setContentZoomScale(payload.scale);
     });
     return () => {
+      offCloseSnapshot();
       offDocUpdate();
       offDocSaved();
       offZoom();
@@ -960,7 +987,10 @@ export function EditView() {
   React.useEffect(() => {
     const view = editorViewRef.current;
     if (!view) return;
-    view.dispatch({ effects: editorEditableCompartment.reconfigure(EditorView.editable.of(!presentationMode)) });
+    view.dispatch({ effects: editorEditableCompartment.reconfigure([
+      EditorView.editable.of(!presentationMode),
+      EditorState.readOnly.of(presentationMode)
+    ]) });
   }, [presentationMode, editorViewVersion]);
 
   const syncActiveWebTabBounds = React.useCallback(() => {
@@ -1054,10 +1084,10 @@ export function EditView() {
 
   const runEditorCommand = React.useCallback((command: (view: EditorView) => boolean) => {
     const view = editorViewRef.current;
-    if (!view) return false;
+    if (!view || view.state.readOnly) return false;
     setActiveTabId('markdown');
     window.requestAnimationFrame(() => {
-      command(view);
+      if (!view.state.readOnly) command(view);
     });
     return true;
   }, []);
@@ -1094,7 +1124,7 @@ export function EditView() {
       const block = view.lineBlockAt(line.to);
       images.forEach((image, index) => {
         previews.push({
-          key: `${lineNumber}:${index}:${image.url}`,
+          key: `${docPath ?? ''}:${lineNumber}:${index}:${image.url}`,
           line: lineNumber,
           top: block.top + 10 + index * 8,
           rawUrl: image.url,
@@ -1104,7 +1134,7 @@ export function EditView() {
     }
 
     return previews;
-  }, [editorViewVersion, markdown, contentZoomScale, currentScrollTop, currentViewportHeight]);
+  }, [docPath, editorViewVersion, markdown, contentZoomScale, currentScrollTop, currentViewportHeight]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -1424,14 +1454,18 @@ export function EditView() {
       const key = e.key.toLowerCase();
       const mod = e.ctrlKey || e.metaKey;
       const shiftMod = mod && e.shiftKey;
-      const editorActive = activeTabIdRef.current === 'markdown';
+      const target = e.target;
+      const inTextField = target instanceof HTMLElement &&
+        !editorViewRef.current?.contentDOM.contains(target) &&
+        (target.matches('input, textarea, select') || target.isContentEditable);
+      const editorActive = activeTabIdRef.current === 'markdown' && !inTextField;
 
-      if (mod && !e.shiftKey && e.key === '1') {
+      if (mod && !e.altKey && !e.shiftKey && e.key === '1') {
         e.preventDefault();
         setActiveTabId('markdown');
         return;
       }
-      if (mod && !e.shiftKey && e.key === '2') {
+      if (mod && !e.altKey && !e.shiftKey && e.key === '2') {
         e.preventDefault();
         focusFirstWebTab();
         return;
@@ -1476,6 +1510,20 @@ export function EditView() {
         runEditorCommand((view) => wrapSelection(view, '*', '*', 'italic'));
         return;
       }
+      if (editorActive && mod && !e.altKey && !e.shiftKey && (key === 'f' || key === 'h')) {
+        e.preventDefault();
+        const view = editorViewRef.current;
+        if (view) {
+          openSearchPanel(view);
+          if (key === 'h') view.dispatch({ effects: showReplacePanel.of(true) });
+        }
+        return;
+      }
+      if (editorActive && mod && !e.altKey && !e.shiftKey && key === 'e') {
+        e.preventDefault();
+        runEditorCommand((view) => wrapSelection(view, '`', '`', 'code'));
+        return;
+      }
       if (editorActive && shiftMod && key === 'x') {
         e.preventDefault();
         runEditorCommand((view) => wrapSelection(view, '~~', '~~', 'strikethrough'));
@@ -1486,12 +1534,12 @@ export function EditView() {
         runEditorCommand(insertMarkdownLink);
         return;
       }
-      if (editorActive && shiftMod && e.key === '7') {
+      if (editorActive && shiftMod && (e.code === 'Digit7' || e.key === '7')) {
         e.preventDefault();
         runEditorCommand((view) => toggleLinePrefix(view, '- '));
         return;
       }
-      if (editorActive && shiftMod && e.key === '8') {
+      if (editorActive && shiftMod && (e.code === 'Digit8' || e.key === '8')) {
         e.preventDefault();
         runEditorCommand((view) => toggleLinePrefix(view, '1. '));
         return;
@@ -1573,8 +1621,12 @@ export function EditView() {
         window.markflow.notesClose();
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    const offShortcut = window.markflow.onAppShortcut((input) => onKey(new KeyboardEvent('keydown', input)));
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      offShortcut();
+    };
   }, [
     adjustActiveWebTabZoom,
     closeCurrentWebTab,
@@ -1718,11 +1770,11 @@ export function EditView() {
   }, [closeMenus]);
 
   const menuItem = React.useCallback((label: string, shortcut: string, action: () => void, disabled = false) => (
-    <button className="menuItem" disabled={disabled} onMouseDown={menuMouseDown} onClick={() => runMenuAction(action)}>
+    <button className="menuItem" disabled={disabled || (openMenu === 'edit' && presentationMode)} onMouseDown={menuMouseDown} onClick={() => runMenuAction(action)}>
       <span>{label}</span>
       {shortcut ? <kbd>{shortcut}</kbd> : null}
     </button>
-  ), [menuMouseDown, runMenuAction]);
+  ), [menuMouseDown, runMenuAction, openMenu, presentationMode]);
 
   const imageRenderedHeight = React.useCallback((key: string) => {
     const width = imageWidthByKey[key] ?? 720;
@@ -2037,12 +2089,16 @@ export function EditView() {
           <div className="card zoomCard">
             <div className="cardBody fullHeight editorPane zoomEditorPane unifiedEditorPane">
               <CodeMirror
+                key={documentRevision}
                 value={markdown}
                 theme={theme === 'dark' ? oneDark : cmLightTheme}
                 extensions={[
                   mdLang(),
                   EditorView.lineWrapping,
-                  editorEditableCompartment.of(EditorView.editable.of(!presentationMode)),
+                  editorEditableCompartment.of([
+                    EditorView.editable.of(!presentationMode),
+                    EditorState.readOnly.of(presentationMode)
+                  ]),
                   history(),
                   search({ top: true, createPanel: createExpandableSearchPanel }),
                   keymap.of([

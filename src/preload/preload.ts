@@ -98,10 +98,18 @@ contextBridge.exposeInMainWorld('markflow', {
   onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
     const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
     ipcRenderer.on('doc:update', handler);
+    ipcRenderer.send('doc:ready');
     return () => ipcRenderer.removeListener('doc:update', handler);
   },
-  onDocSaved: (cb: (payload: { docPath: string | null }) => void) => {
-    const handler = (_: unknown, payload: { docPath: string | null }) => cb(payload);
+  onCloseSnapshotRequested: (cb: () => string) => {
+    const handler = (_: unknown, input: { requestId: string }) => {
+      ipcRenderer.send('doc:closeSnapshot', { requestId: input.requestId, markdown: cb() });
+    };
+    ipcRenderer.on('doc:requestCloseSnapshot', handler);
+    return () => ipcRenderer.removeListener('doc:requestCloseSnapshot', handler);
+  },
+  onDocSaved: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
+    const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
     ipcRenderer.on('doc:saved', handler);
     return () => ipcRenderer.removeListener('doc:saved', handler);
   },
@@ -114,6 +122,7 @@ contextBridge.exposeInMainWorld('markflow', {
   onNotesUpdate: (cb: (payload: NotesWindowState) => void) => {
     const handler = (_: unknown, payload: NotesWindowState) => cb(payload);
     ipcRenderer.on('notes:update', handler);
+    ipcRenderer.send('notes:ready');
     return () => ipcRenderer.removeListener('notes:update', handler);
   },
   onNotesClosed: (cb: () => void) => {
@@ -142,6 +151,11 @@ contextBridge.exposeInMainWorld('markflow', {
   },
 
   appInfo: () => ipcRenderer.invoke('app:info'),
+  onAppShortcut: (cb: (input: { key: string; code: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) => {
+    const handler = (_: unknown, input: Parameters<typeof cb>[0]) => cb(input);
+    ipcRenderer.on('app:shortcut', handler);
+    return () => ipcRenderer.removeListener('app:shortcut', handler);
+  },
   openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args),
   webTabList: () => ipcRenderer.invoke('webTab:list'),
   webTabCreate: (args: { url: string; reuseExisting?: boolean }) => ipcRenderer.invoke('webTab:create', args),

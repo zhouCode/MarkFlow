@@ -7,4 +7,5 @@ dist_electron/
 .claude/
 .codex/
 .opencode/
+output/
 

@@ -87,6 +87,12 @@ npm install
 npm run dev
 ```
 
+## Regression testing
+
+On Windows, run `npm run test:smoke` to build and test the actual Electron app with Playwright. No separate browser download is needed. Tests use temporary documents and an isolated profile; results and screenshots are written to `output/playwright/`.
+
+See [QA report and release workflow](docs/QA-2026-09-14.md) for findings, remaining work, and the existing GitHub Release process.
+
 ## Build
 
 ```bash

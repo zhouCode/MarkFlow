@@ -86,7 +86,8 @@ declare global {
       notesScrollTo: (payload: { progress: number }) => void;
 
       onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
-      onDocSaved: (cb: (payload: { docPath: string | null }) => void) => () => void;
+      onCloseSnapshotRequested: (cb: () => string) => () => void;
+      onDocSaved: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
       onContentZoomUpdate: (cb: (payload: ContentZoomState) => void) => () => void;
 
       onNotesUpdate: (cb: (payload: NotesWindowState) => void) => () => void;
@@ -103,6 +104,7 @@ declare global {
       updateInstall: () => void;
       onUpdateDownloadProgress: (cb: (payload: { percent: number; transferred: number; total: number }) => void) => () => void;
       appInfo: () => Promise<AppInfo>;
+      onAppShortcut: (cb: (input: { key: string; code: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) => () => void;
       openExternal: (args: { url: string }) => Promise<OpenExternalResult>;
       webTabList: () => Promise<WebTabListResult>;
       webTabCreate: (args: { url: string; reuseExisting?: boolean }) => Promise<WebTabResult>;
