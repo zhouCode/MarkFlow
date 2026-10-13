@@ -10,7 +10,7 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 // Match openHtmlFile's realpath normalization before deriving fixture paths/URLs.
 // Windows CI may expose TEMP through an 8.3 alias (RUNNER~1); macOS may use a symlink.
-const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'markflow-qa-')));
+const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'markflow-qa-')));
 const output = path.join(root, 'output', 'playwright');
 fs.mkdirSync(output, { recursive: true });
 const fixture = '# Classroom QA\n\nalpha beta gamma\n\n<!-- note: PRIVATE_TEACHER_NOTE -->\n\n## Topic\n\nSecond paragraph.\n';
