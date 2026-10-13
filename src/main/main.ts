@@ -18,7 +18,7 @@ app.on('open-file', (event, filePath) => {
 });
 
 app.on('second-instance', (_event, argv) => {
-  setPendingOpenPath(extractMarkdownPathFromArgv(argv));
+  setPendingOpenPath(extractDocumentPathFromArgv(argv));
   if (editWindow) {
     if (editWindow.isMinimized()) editWindow.restore();
     editWindow.focus();
@@ -67,6 +67,7 @@ type FileBrowserEntry = {
   depth: number;
   parentPath: string | null;
   isMarkdown: boolean;
+  isHtml: boolean;
 };
 
 type PendingOpenState = {
@@ -105,6 +106,7 @@ type WebTabRecord = {
   view: WebContentsView;
   state: WebTabState;
   bounds: Rectangle;
+  localRootDir: string | null;
 };
 
 type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
@@ -177,6 +179,18 @@ let notesDockState: DockState | null = null;
 let isApplyingDockBounds = false;
 const webTabs = new Map<string, WebTabRecord>();
 let activeWebTabId: string | null = null;
+let htmlDocumentId: string | null = null;
+
+function documentState() {
+  const record = htmlDocumentId ? webTabs.get(htmlDocumentId) : null;
+  return { docPath: currentDocPath, markdown: currentMarkdown, html: record ? cloneWebTabState(record.state) : null };
+}
+
+function closeHtmlDocument() {
+  const id = htmlDocumentId;
+  htmlDocumentId = null;
+  if (id) closeWebTab(id);
+}
 
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
@@ -227,10 +241,16 @@ function clampWebTabZoomFactor(value: number): number {
 }
 
 function webTabStates(): WebTabState[] {
-  return [...webTabs.values()].map((tab) => cloneWebTabState(tab.state));
+  return [...webTabs.values()].filter((tab) => !tab.localRootDir).map((tab) => cloneWebTabState(tab.state));
 }
 
 function sendWebTabUpdate(record: WebTabRecord) {
+  if (record.localRootDir) {
+    if (record.id !== htmlDocumentId) return;
+    currentDocPath = fileURLToPath(record.state.url);
+    editWindow?.webContents.send('doc:htmlUpdated', { docPath: currentDocPath, html: cloneWebTabState(record.state) });
+    return;
+  }
   editWindow?.webContents.send('webTab:updated', cloneWebTabState(record.state));
 }
 
@@ -259,17 +279,44 @@ function applyWebTabVisibility() {
   }
 }
 
-function createWebTabView(id: string, initialUrl: string): WebContentsView {
+function normalizeLocalHtmlUrl(input: string, rootDir: string): string | null {
+  try {
+    const url = new URL(input);
+    if (url.protocol !== 'file:') return null;
+    const filePath = fileURLToPath(url);
+    const relative = path.relative(rootDir, filePath);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    return looksLikeHtmlPath(filePath) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function configureLocalHtmlSession(id: string, rootDir: string) {
+  const localSession = session.fromPartition(`markflow-html-${id}`);
+  localSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  localSession.setPermissionCheckHandler(() => false);
+  localSession.webRequest.onBeforeRequest({ urls: ['file://*/*'] }, (details, callback) => {
+    void Promise.resolve().then(() => fs.realpath(fileURLToPath(details.url))).then((filePath) => {
+      const relative = path.relative(rootDir, filePath);
+      const outsideRoot = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+      callback({ cancel: outsideRoot || (details.resourceType === 'mainFrame' && !looksLikeHtmlPath(filePath)) });
+    }).catch(() => callback({ cancel: true }));
+  });
+  return localSession;
+}
+
+function createWebTabView(id: string, localRootDir: string | null): WebContentsView {
   const view = new WebContentsView({
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       // Remix currently depends on browser APIs that can stall under Electron's strict sandboxed WebContentsView mode.
       // Keep Node disabled and context isolation/webSecurity enabled; do not expose a preload to remote pages.
-      sandbox: false,
+      sandbox: Boolean(localRootDir),
       webSecurity: true,
       backgroundThrottling: false,
-      partition: WEB_TAB_PARTITION,
+      session: localRootDir ? configureLocalHtmlSession(id, localRootDir) : session.fromPartition(WEB_TAB_PARTITION),
       transparent: false,
       spellcheck: false
     }
@@ -281,7 +328,7 @@ function createWebTabView(id: string, initialUrl: string): WebContentsView {
     const key = input.key.toLowerCase();
     const mod = input.control || input.meta;
     const appShortcut =
-      (mod && !input.alt && !input.shift && ['1', '2', 'l', 'w', ','].includes(key)) ||
+      (mod && !input.alt && !input.shift && ['1', '2', 'l', 'w', 'o', ','].includes(key)) ||
       (mod && !input.alt && input.shift && ['r', 'p'].includes(key)) ||
       (!mod && input.alt && ['m', 'e'].includes(key)) ||
       key === 'f5';
@@ -300,19 +347,30 @@ function createWebTabView(id: string, initialUrl: string): WebContentsView {
     adjustWebTabZoom(id, action);
   });
   contents.setWindowOpenHandler(({ url }) => {
+    const localUrl = localRootDir ? normalizeLocalHtmlUrl(url, localRootDir) : null;
+    if (localUrl) void openHtmlFile(fileURLToPath(localUrl), localRootDir).catch(() => {});
     const normalized = normalizeInternalWebUrl(url);
     if (normalized) {
       void createOrFocusWebTab(normalized, true);
     }
     return { action: 'deny' };
   });
-  contents.on('will-navigate', (event, url) => {
+  const guardNavigation = (event: Electron.Event, url: string) => {
+    if (localRootDir) {
+      if (normalizeLocalHtmlUrl(url, localRootDir)) return;
+      event.preventDefault();
+      const normalized = normalizeInternalWebUrl(url);
+      if (normalized) void createOrFocusWebTab(normalized, true);
+      return;
+    }
     const normalized = normalizeInternalWebUrl(url);
     if (!normalized) {
       event.preventDefault();
       return;
     }
-  });
+  };
+  contents.on('will-navigate', guardNavigation);
+  contents.on('will-redirect', guardNavigation);
   contents.on('did-start-loading', () => {
     const record = webTabs.get(id);
     if (record) setWebTabState(record, { loading: true });
@@ -337,13 +395,12 @@ function createWebTabView(id: string, initialUrl: string): WebContentsView {
     const record = webTabs.get(id);
     if (record) setWebTabState(record, { loading: false, url: url || record.state.url, title: description || record.state.title });
   });
-  void contents.loadURL(initialUrl, { userAgent: WEB_TAB_USER_AGENT });
   return view;
 }
 
-async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting = false): Promise<WebTabResult> {
+async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting = false, localRootDir: string | null = null): Promise<WebTabResult> {
   if (!editWindow || editWindow.isDestroyed()) return { success: false, message: 'Editor window is not available.' };
-  const normalized = normalizeInternalWebUrl(inputUrl);
+  const normalized = localRootDir ? normalizeLocalHtmlUrl(inputUrl, localRootDir) : normalizeInternalWebUrl(inputUrl);
   if (!normalized) return { success: false, message: 'Only http/https URLs can be opened in MarkFlow tabs.' };
 
   const existing = reuseExisting ? [...webTabs.values()].find((tab) => tab.state.url === normalized) : null;
@@ -351,19 +408,22 @@ async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting
     if (focus) activeWebTabId = existing.id;
     applyWebTabVisibility();
     sendWebTabsChanged();
+    if (focus && !localRootDir) editWindow.webContents.send('webTab:opened', cloneWebTabState(existing.state));
     return { success: true, tab: cloneWebTabState(existing.state) };
   }
 
   const id = crypto.randomUUID();
-  const view = createWebTabView(id, normalized);
+  if (localRootDir) closeHtmlDocument();
+  const view = createWebTabView(id, localRootDir);
   const record: WebTabRecord = {
     id,
     view,
     bounds: { x: -10000, y: -10000, width: 1, height: 1 },
+    localRootDir,
     state: {
       id,
       url: normalized,
-      title: new URL(normalized).hostname || normalized,
+      title: localRootDir ? path.basename(fileURLToPath(normalized)) : new URL(normalized).hostname || normalized,
       loading: true,
       canGoBack: false,
       canGoForward: false,
@@ -371,12 +431,35 @@ async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting
     }
   };
   webTabs.set(id, record);
+  if (localRootDir) htmlDocumentId = id;
   view.webContents.zoomFactor = record.state.zoomFactor;
   editWindow.contentView.addChildView(view);
   if (focus) activeWebTabId = id;
   applyWebTabVisibility();
   sendWebTabsChanged();
+  if (focus && !localRootDir) editWindow.webContents.send('webTab:opened', cloneWebTabState(record.state));
+  void view.webContents.loadURL(normalized, { userAgent: WEB_TAB_USER_AGENT }).catch(() => {});
   return { success: true, tab: cloneWebTabState(record.state) };
+}
+
+async function openHtmlFile(filePath: string, allowedRootDir: string | null = null) {
+  if (!looksLikeHtmlPath(filePath)) throw new Error('Only HTML files can be previewed.');
+  const resolvedPath = await fs.realpath(path.resolve(filePath));
+  if (allowedRootDir && !normalizeLocalHtmlUrl(pathToFileURL(resolvedPath).toString(), allowedRootDir)) {
+    throw new Error('HTML links must stay within the opened file directory.');
+  }
+  const stats = await fs.stat(resolvedPath);
+  if (!stats.isFile() || !looksLikeHtmlPath(resolvedPath)) throw new Error('Selected path is not an HTML file.');
+  const result = await createOrFocusWebTab(pathToFileURL(resolvedPath).toString(), true, true, path.dirname(resolvedPath));
+  if (!result.success) throw new Error(result.message);
+  currentDocPath = resolvedPath;
+  currentMarkdown = '';
+  savedMarkdown = '';
+  await writeCurrentPersistedState({ lastDocPath: resolvedPath });
+  const payload = documentState();
+  editWindow?.webContents.send('doc:update', payload);
+  forwardToNotes('doc:update', payload);
+  return payload;
 }
 
 function closeWebTab(id: string): WebTabResult {
@@ -405,9 +488,16 @@ function focusWebTab(id: string | null): WebTabResult {
   return { success: true, tab: tab ? cloneWebTabState(tab.state) : { id: 'markdown', url: '', title: 'Markdown', loading: false, canGoBack: false, canGoForward: false, zoomFactor: DEFAULT_WEB_TAB_ZOOM_FACTOR } };
 }
 
-function navigateWebTab(id: string, inputUrl: string): WebTabResult {
+async function navigateWebTab(id: string, inputUrl: string): Promise<WebTabResult> {
   const record = webTabs.get(id);
   if (!record) return { success: false, message: 'Web tab not found.' };
+  if (record.localRootDir) {
+    const normalized = normalizeLocalHtmlUrl(inputUrl, record.localRootDir);
+    if (!normalized) return createOrFocusWebTab(inputUrl);
+    setWebTabState(record, { url: normalized, loading: true });
+    void record.view.webContents.loadURL(normalized).catch(() => {});
+    return { success: true, tab: cloneWebTabState(record.state) };
+  }
   const normalized = normalizeInternalWebUrl(inputUrl);
   if (!normalized) return { success: false, message: 'Only http/https URLs can be opened in MarkFlow tabs.' };
   setWebTabState(record, { url: normalized, loading: true, title: new URL(normalized).hostname || normalized });
@@ -459,6 +549,7 @@ function destroyAllWebTabs() {
   }
   webTabs.clear();
   activeWebTabId = null;
+  htmlDocumentId = null;
 }
 
 
@@ -526,15 +617,21 @@ function looksLikeMarkdownPath(filePath: string | null | undefined): filePath is
   return ext === '.md' || ext === '.markdown' || ext === '.mdx';
 }
 
-function extractMarkdownPathFromArgv(argv: string[]): string | null {
+function looksLikeHtmlPath(filePath: string | null | undefined): filePath is string {
+  if (!filePath) return false;
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.html' || ext === '.htm';
+}
+
+function extractDocumentPathFromArgv(argv: string[]): string | null {
   for (const arg of argv) {
-    if (looksLikeMarkdownPath(arg)) return arg;
+    if (looksLikeMarkdownPath(arg) || looksLikeHtmlPath(arg)) return arg;
   }
   return null;
 }
 
 function setPendingOpenPath(filePath: string | null | undefined) {
-  if (!looksLikeMarkdownPath(filePath)) return;
+  if (!looksLikeMarkdownPath(filePath) && !looksLikeHtmlPath(filePath)) return;
   pendingOpenState.filePath = filePath;
 }
 
@@ -544,11 +641,12 @@ function clearPendingOpenPath(filePath: string | null) {
 
 async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
+  closeHtmlDocument();
   currentDocPath = filePath;
   currentMarkdown = markdown;
   savedMarkdown = markdown;
   await writeCurrentPersistedState({ lastDocPath: filePath });
-  return { docPath: currentDocPath, markdown: currentMarkdown };
+  return documentState();
 }
 
 async function listDirectoryTree(dirPath: string, depth = 0, parentPath: string | null = null): Promise<FileBrowserEntry[]> {
@@ -570,20 +668,22 @@ async function listDirectoryTree(dirPath: string, depth = 0, parentPath: string 
         kind: 'directory',
         depth,
         parentPath,
-        isMarkdown: false
+        isMarkdown: false,
+        isHtml: false
       });
       result.push(...children);
       continue;
     }
 
-    if (!entry.isFile() || !looksLikeMarkdownPath(entryPath)) continue;
+    if (!entry.isFile() || (!looksLikeMarkdownPath(entryPath) && !looksLikeHtmlPath(entryPath))) continue;
     result.push({
       name: entry.name,
       path: entryPath,
       kind: 'file',
       depth,
       parentPath,
-      isMarkdown: true
+      isMarkdown: looksLikeMarkdownPath(entryPath),
+      isHtml: looksLikeHtmlPath(entryPath)
     });
   }
 
@@ -598,6 +698,29 @@ async function loadDocumentIntoWindows(filePath: string) {
   return payload;
 }
 
+async function openFileIntoWindows(filePath: string) {
+  if (looksLikeHtmlPath(filePath)) {
+    const result = await openHtmlFile(filePath);
+    clearPendingOpenPath(filePath);
+    return result;
+  }
+  if (!looksLikeMarkdownPath(filePath)) throw new Error('Only Markdown and HTML files can be opened.');
+  return loadDocumentIntoWindows(filePath);
+}
+
+async function pickDocumentPath(): Promise<string | null> {
+  if (!editWindow) return null;
+  const res = await dialog.showOpenDialog(editWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Markdown & HTML', extensions: ['md', 'markdown', 'mdx', 'html', 'htm'] },
+      { name: 'Markdown', extensions: ['md', 'markdown', 'mdx'] },
+      { name: 'HTML', extensions: ['html', 'htm'] }
+    ]
+  });
+  return res.canceled ? null : res.filePaths[0] ?? null;
+}
+
 function isRendererReady(window: BrowserWindow | null): boolean {
   return Boolean(window && editRendererReady && !window.webContents.isLoadingMainFrame());
 }
@@ -607,7 +730,7 @@ async function openPendingDocumentIfAny() {
   if (!filePath || !isRendererReady(editWindow)) return false;
 
   try {
-    await loadDocumentIntoWindows(filePath);
+    await openFileIntoWindows(filePath);
     return true;
   } catch {
     clearPendingOpenPath(filePath);
@@ -1068,6 +1191,7 @@ function createEditWindow() {
 }
 
 async function saveDocument(docPath: string | null, markdown: string) {
+  if (docPath && /\.html?$/i.test(docPath)) return null;
   const window = editWindow;
   if (!window) return null;
   let filePath = docPath;
@@ -1384,7 +1508,7 @@ async function renderMarkdownPdf(markdown: string, docPath: string | null): Prom
 app.whenReady().then(async () => {
   registerMarkdownAssetProtocol();
   configureWebTabSession();
-  setPendingOpenPath(extractMarkdownPathFromArgv(process.argv.slice(1)));
+  setPendingOpenPath(extractDocumentPathFromArgv(process.argv.slice(1)));
   const persisted = await readPersistedState();
   currentWorkspaceDirPath = persisted.lastWorkspaceDirPath ? path.resolve(persisted.lastWorkspaceDirPath) : null;
   notesSettings = persisted.notesSettings;
@@ -1402,23 +1526,22 @@ app.whenReady().then(async () => {
   }
   createEditWindow();
 
-  ipcMain.handle('doc:open', async () => {
-    const { dialog } = await import('electron');
-    if (!editWindow) return null;
-    const res = await dialog.showOpenDialog(editWindow, {
-      properties: ['openFile'],
-      filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdx'] }]
-    });
-    if (res.canceled || res.filePaths.length === 0) return null;
-    const filePath = res.filePaths[0]!;
-    return loadDocumentIntoWindows(filePath);
+  ipcMain.handle('doc:pick', async (event) => {
+    if (!isTrustedEditSender(event)) throw new Error('Unauthorized file request.');
+    return pickDocumentPath();
+  });
+
+  ipcMain.handle('doc:open', async (event) => {
+    if (!isTrustedEditSender(event)) throw new Error('Unauthorized file request.');
+    const filePath = await pickDocumentPath();
+    return filePath ? openFileIntoWindows(filePath) : null;
   });
 
   ipcMain.on('doc:ready', (event) => {
     if (event.sender !== editWindow?.webContents) return;
     editRendererReady = true;
     if (pendingOpenState.filePath) void openPendingDocumentIfAny();
-    else event.sender.send('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
+    else event.sender.send('doc:update', documentState());
   });
 
   ipcMain.on('notes:ready', (event) => {
@@ -1427,11 +1550,9 @@ app.whenReady().then(async () => {
     if (currentNotesState) event.sender.send('notes:update', currentNotesState);
   });
 
-  ipcMain.handle('doc:openPath', async (_evt, args: { filePath: string }) => {
-    if (!looksLikeMarkdownPath(args.filePath)) {
-      throw new Error('Only Markdown files can be opened in the editor.');
-    }
-    return loadDocumentIntoWindows(args.filePath);
+  ipcMain.handle('doc:openPath', async (event, args: unknown) => {
+    if (!isTrustedEditSender(event)) throw new Error('Unauthorized file request.');
+    return openFileIntoWindows(getStringField(args, 'filePath') ?? '');
   });
 
   ipcMain.handle('doc:save', async (_evt, args: { docPath: string | null; markdown: string }) => {
@@ -1558,6 +1679,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {
+    if (htmlDocumentId) return;
     currentMarkdown = args.markdown;
     currentDocPath = args.docPath;
   });
