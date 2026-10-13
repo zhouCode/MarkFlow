@@ -767,6 +767,7 @@ export function EditView() {
   const editorViewRef = React.useRef<EditorView | null>(null);
   const markdownRef = React.useRef(markdown);
   const docPathRef = React.useRef<string | null>(docPath);
+  const workspaceDocPathRef = React.useRef<string | null>(null);
   const notesWindowOpenRef = React.useRef(notesWindowOpen);
   const handleOpenFileRef = React.useRef<() => Promise<void>>(async () => {});
   const toastTimerRef = React.useRef<number | null>(null);
@@ -1251,6 +1252,8 @@ export function EditView() {
   React.useEffect(() => {
     if (!docPath || !workspaceRestoreResolved) return;
     if (workspaceStatus === 'loading') return;
+    if (workspaceDocPathRef.current === docPath) return;
+    workspaceDocPathRef.current = docPath;
     if (workspaceDirPath && isPathInsideDir(docPath, workspaceDirPath)) return;
     const dirPath = getParentDirPath(docPath);
     if (!dirPath) return;

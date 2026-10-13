@@ -167,11 +167,12 @@ async function selectAlpha() {
       await open();
       await page.keyboard.insertText('Unsaved HTML test ');
       const before = await readDoc();
+      const htmlWindow = app.waitForEvent('window');
       await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).click();
+      const web = await htmlWindow;
+      await web.waitForURL(htmlUrl);
       await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(tab => tab.url === expected && !tab.loading), htmlUrl);
       await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
-      const web = app.context().pages().find(p => p.url() === htmlUrl);
-      assert.ok(web);
       assert.equal(await web.locator('h1').innerText(), 'HTML classroom');
       assert.equal(await web.locator('h1').evaluate(el => getComputedStyle(el).color), 'rgb(12, 34, 56)');
       assert.equal(await web.locator('img').evaluate(el => el.complete && el.naturalWidth > 0), true);
@@ -183,6 +184,7 @@ async function selectAlpha() {
       assert.equal(prefs.webSecurity, true);
       await webKey(htmlUrl, '=');
       await page.waitForFunction(async () => (await window.markflow.webTabList()).tabs[0].zoomFactor > 1);
+      await page.screenshot({ path: path.join(output, 'html-preview.png') });
       await page.locator('.tabButton').first().click();
       assert.equal(await readDoc(), before);
       assert.ok(await page.locator('.dirtyMark').count());
@@ -202,6 +204,9 @@ async function selectAlpha() {
       assert.equal(await readDoc(), before);
       const filters = await app.evaluate(() => globalThis.qaFileFilters);
       assert.ok(filters.some(filter => filter.extensions.includes('html') && filter.extensions.includes('htm')));
+      await webKey(htmlUrl, 'o');
+      await settle();
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
       await app.evaluate(({ dialog }) => { dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] }); });
       assert.equal(await page.evaluate(() => window.markflow.docOpen()), null);
       const result = await page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), htmlFile);

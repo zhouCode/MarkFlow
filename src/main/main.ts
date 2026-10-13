@@ -310,7 +310,7 @@ function createWebTabView(id: string, localRootDir: string | null): WebContentsV
     const key = input.key.toLowerCase();
     const mod = input.control || input.meta;
     const appShortcut =
-      (mod && !input.alt && !input.shift && ['1', '2', 'l', 'w', ','].includes(key)) ||
+      (mod && !input.alt && !input.shift && ['1', '2', 'l', 'w', 'o', ','].includes(key)) ||
       (mod && !input.alt && input.shift && ['r', 'p'].includes(key)) ||
       (!mod && input.alt && ['m', 'e'].includes(key)) ||
       key === 'f5';
