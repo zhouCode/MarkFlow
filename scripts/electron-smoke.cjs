@@ -8,7 +8,9 @@ const http = require('node:http');
 const { pathToFileURL } = require('node:url');
 
 const root = path.resolve(__dirname, '..');
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'markflow-qa-'));
+// Match openHtmlFile's realpath normalization before deriving fixture paths/URLs.
+// Windows CI may expose TEMP through an 8.3 alias (RUNNER~1); macOS may use a symlink.
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'markflow-qa-')));
 const output = path.join(root, 'output', 'playwright');
 fs.mkdirSync(output, { recursive: true });
 const fixture = '# Classroom QA\n\nalpha beta gamma\n\n<!-- note: PRIVATE_TEACHER_NOTE -->\n\n## Topic\n\nSecond paragraph.\n';
@@ -485,6 +487,9 @@ async function selectAlpha() {
       assert.equal(await page.locator('.mf-note-source-line').evaluate(el => getComputedStyle(el).opacity), '0');
       await page.locator('.cm-scroller').evaluate(el => { el.scrollTop = 300; });
       await notesPage.waitForFunction(() => document.querySelector('.notesWindowScroller').scrollTop >= 250);
+      // Let the incoming scroll update clear its one-frame feedback-loop guard
+      // before simulating a new scroll originating in the notes window.
+      await notesPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await notesPage.locator('.notesWindowScroller').evaluate(el => { el.scrollTop = 700; });
       await page.waitForFunction(() => document.querySelector('.cm-scroller').scrollTop >= 600);
       const closed = notesPage.waitForEvent('close');
