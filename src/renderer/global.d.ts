@@ -58,7 +58,7 @@ declare global {
   type WebTabState = { id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; zoomFactor: number };
   type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
   type WebTabListResult = { success: true; tabs: WebTabState[] } | { success: false; message: string };
-  type FileOpenResult = { docPath: string | null; markdown: string } | { tab: WebTabState };
+  type FileOpenResult = { docPath: string | null; markdown: string; html: WebTabState | null };
 
   interface Window {
     markflow: {
@@ -88,7 +88,8 @@ declare global {
       notesNavigateTo: (payload: { anchorId: string }) => void;
       notesScrollTo: (payload: { progress: number }) => void;
 
-      onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
+      onDocUpdate: (cb: (payload: FileOpenResult) => void) => () => void;
+      onHtmlDocumentUpdated: (cb: (payload: { docPath: string; html: WebTabState }) => void) => () => void;
       onCloseSnapshotRequested: (cb: () => string) => () => void;
       onDocSaved: (cb: (payload: { docPath: string | null; markdown: string }) => void) => () => void;
       onContentZoomUpdate: (cb: (payload: ContentZoomState) => void) => () => void;

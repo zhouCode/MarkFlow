@@ -179,6 +179,18 @@ let notesDockState: DockState | null = null;
 let isApplyingDockBounds = false;
 const webTabs = new Map<string, WebTabRecord>();
 let activeWebTabId: string | null = null;
+let htmlDocumentId: string | null = null;
+
+function documentState() {
+  const record = htmlDocumentId ? webTabs.get(htmlDocumentId) : null;
+  return { docPath: currentDocPath, markdown: currentMarkdown, html: record ? cloneWebTabState(record.state) : null };
+}
+
+function closeHtmlDocument() {
+  const id = htmlDocumentId;
+  htmlDocumentId = null;
+  if (id) closeWebTab(id);
+}
 
 function stateFilePath(): string {
   return path.join(app.getPath('userData'), 'state.json');
@@ -229,10 +241,16 @@ function clampWebTabZoomFactor(value: number): number {
 }
 
 function webTabStates(): WebTabState[] {
-  return [...webTabs.values()].map((tab) => cloneWebTabState(tab.state));
+  return [...webTabs.values()].filter((tab) => !tab.localRootDir).map((tab) => cloneWebTabState(tab.state));
 }
 
 function sendWebTabUpdate(record: WebTabRecord) {
+  if (record.localRootDir) {
+    if (record.id !== htmlDocumentId) return;
+    currentDocPath = fileURLToPath(record.state.url);
+    editWindow?.webContents.send('doc:htmlUpdated', { docPath: currentDocPath, html: cloneWebTabState(record.state) });
+    return;
+  }
   editWindow?.webContents.send('webTab:updated', cloneWebTabState(record.state));
 }
 
@@ -390,11 +408,12 @@ async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting
     if (focus) activeWebTabId = existing.id;
     applyWebTabVisibility();
     sendWebTabsChanged();
-    if (focus) editWindow.webContents.send('webTab:opened', cloneWebTabState(existing.state));
+    if (focus && !localRootDir) editWindow.webContents.send('webTab:opened', cloneWebTabState(existing.state));
     return { success: true, tab: cloneWebTabState(existing.state) };
   }
 
   const id = crypto.randomUUID();
+  if (localRootDir) closeHtmlDocument();
   const view = createWebTabView(id, localRootDir);
   const record: WebTabRecord = {
     id,
@@ -412,18 +431,19 @@ async function createOrFocusWebTab(inputUrl: string, focus = true, reuseExisting
     }
   };
   webTabs.set(id, record);
+  if (localRootDir) htmlDocumentId = id;
   view.webContents.zoomFactor = record.state.zoomFactor;
   editWindow.contentView.addChildView(view);
   if (focus) activeWebTabId = id;
   applyWebTabVisibility();
   sendWebTabsChanged();
-  if (focus) editWindow.webContents.send('webTab:opened', cloneWebTabState(record.state));
+  if (focus && !localRootDir) editWindow.webContents.send('webTab:opened', cloneWebTabState(record.state));
   void view.webContents.loadURL(normalized, { userAgent: WEB_TAB_USER_AGENT }).catch(() => {});
   return { success: true, tab: cloneWebTabState(record.state) };
 }
 
-async function openHtmlFile(filePath: string, allowedRootDir: string | null = null): Promise<{ tab: WebTabState }> {
-  if (!looksLikeHtmlPath(filePath)) throw new Error('Only HTML files can be opened in local tabs.');
+async function openHtmlFile(filePath: string, allowedRootDir: string | null = null) {
+  if (!looksLikeHtmlPath(filePath)) throw new Error('Only HTML files can be previewed.');
   const resolvedPath = await fs.realpath(path.resolve(filePath));
   if (allowedRootDir && !normalizeLocalHtmlUrl(pathToFileURL(resolvedPath).toString(), allowedRootDir)) {
     throw new Error('HTML links must stay within the opened file directory.');
@@ -432,7 +452,14 @@ async function openHtmlFile(filePath: string, allowedRootDir: string | null = nu
   if (!stats.isFile() || !looksLikeHtmlPath(resolvedPath)) throw new Error('Selected path is not an HTML file.');
   const result = await createOrFocusWebTab(pathToFileURL(resolvedPath).toString(), true, true, path.dirname(resolvedPath));
   if (!result.success) throw new Error(result.message);
-  return { tab: result.tab };
+  currentDocPath = resolvedPath;
+  currentMarkdown = '';
+  savedMarkdown = '';
+  await writeCurrentPersistedState({ lastDocPath: resolvedPath });
+  const payload = documentState();
+  editWindow?.webContents.send('doc:update', payload);
+  forwardToNotes('doc:update', payload);
+  return payload;
 }
 
 function closeWebTab(id: string): WebTabResult {
@@ -522,6 +549,7 @@ function destroyAllWebTabs() {
   }
   webTabs.clear();
   activeWebTabId = null;
+  htmlDocumentId = null;
 }
 
 
@@ -613,11 +641,12 @@ function clearPendingOpenPath(filePath: string | null) {
 
 async function loadDocument(filePath: string) {
   const markdown = await fs.readFile(filePath, 'utf-8');
+  closeHtmlDocument();
   currentDocPath = filePath;
   currentMarkdown = markdown;
   savedMarkdown = markdown;
   await writeCurrentPersistedState({ lastDocPath: filePath });
-  return { docPath: currentDocPath, markdown: currentMarkdown };
+  return documentState();
 }
 
 async function listDirectoryTree(dirPath: string, depth = 0, parentPath: string | null = null): Promise<FileBrowserEntry[]> {
@@ -1162,6 +1191,7 @@ function createEditWindow() {
 }
 
 async function saveDocument(docPath: string | null, markdown: string) {
+  if (docPath && /\.html?$/i.test(docPath)) return null;
   const window = editWindow;
   if (!window) return null;
   let filePath = docPath;
@@ -1511,7 +1541,7 @@ app.whenReady().then(async () => {
     if (event.sender !== editWindow?.webContents) return;
     editRendererReady = true;
     if (pendingOpenState.filePath) void openPendingDocumentIfAny();
-    else event.sender.send('doc:update', { docPath: currentDocPath, markdown: currentMarkdown });
+    else event.sender.send('doc:update', documentState());
   });
 
   ipcMain.on('notes:ready', (event) => {
@@ -1649,6 +1679,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on('doc:setMarkdown', (_evt, args: { markdown: string; docPath: string | null }) => {
+    if (htmlDocumentId) return;
     currentMarkdown = args.markdown;
     currentDocPath = args.docPath;
   });

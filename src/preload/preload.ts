@@ -97,11 +97,16 @@ contextBridge.exposeInMainWorld('markflow', {
   notesNavigateTo: (payload: { anchorId: string }) => ipcRenderer.send('notes:navigateTo', payload),
   notesScrollTo: (payload: { progress: number }) => ipcRenderer.send('notes:scrollTo', payload),
 
-  onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string }) => void) => {
-    const handler = (_: unknown, payload: { docPath: string | null; markdown: string }) => cb(payload);
+  onDocUpdate: (cb: (payload: { docPath: string | null; markdown: string; html: WebTabState | null }) => void) => {
+    const handler = (_: unknown, payload: { docPath: string | null; markdown: string; html: WebTabState | null }) => cb(payload);
     ipcRenderer.on('doc:update', handler);
     ipcRenderer.send('doc:ready');
     return () => ipcRenderer.removeListener('doc:update', handler);
+  },
+  onHtmlDocumentUpdated: (cb: (payload: { docPath: string; html: WebTabState }) => void) => {
+    const handler = (_: unknown, payload: { docPath: string; html: WebTabState }) => cb(payload);
+    ipcRenderer.on('doc:htmlUpdated', handler);
+    return () => ipcRenderer.removeListener('doc:htmlUpdated', handler);
   },
   onCloseSnapshotRequested: (cb: () => string) => {
     const handler = (_: unknown, input: { requestId: string }) => {

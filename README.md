@@ -6,7 +6,7 @@ MarkFlow is an Electron Markdown editor designed for teaching and live walkthrou
 
 - Markdown editor with classroom-friendly rendered editing
 - Internal web tabs for `http/https` pages, including Remix IDE
-- Local `.html` / `.htm` files in the workspace sidebar, rendered in isolated internal tabs
+- Local `.html` / `.htm` files alongside Markdown in the workspace, rendered in the same document area
 - One-window screen sharing: switch between Markdown and Remix without changing shared windows
 - Address bar for internal web tabs
 - Quick-open Remix / configurable quick URL
@@ -36,10 +36,11 @@ MarkFlow is an Electron Markdown editor designed for teaching and live walkthrou
 ## Local HTML files
 
 - Use **Function → Open File** (or `Ctrl/Cmd+O`) to open a `.html` or `.htm` file, or select one from **Open Folder**'s file list.
-- HTML is rendered as a page in an internal tab, not edited as Markdown. Opening it leaves the current Markdown document and unsaved edits intact; reopening the same page focuses its existing tab.
+- HTML is rendered as a page in the current document area, not edited as Markdown and not opened in an additional top tab. The file sidebar stays visible so HTML and Markdown can be selected at the same level; the existing document tab shows the selected file's name.
+- Switching from Markdown to HTML uses the same unsaved-change confirmation as switching Markdown files. Save, discard, or cancel before switching. HTML previews are read-only; Markdown save/formatting/PDF operations do not modify HTML files.
 - Relative images, stylesheets and browser scripts can load from the HTML file's directory and its subdirectories. Files outside that directory (including symlinks pointing outside) are blocked; keep page assets alongside the HTML file.
 - Local pages run sandboxed, with no Node or MarkFlow API access, in a separate non-persistent session. Local HTML links stay within that directory; `http/https` links open separate web tabs.
-- Tabs support the usual switch, close and zoom shortcuts. HTML files can also be passed as application startup arguments or opened through the OS's existing Open With action.
+- Document zoom shortcuts also work on HTML. Remote web tabs remain separate; `Ctrl/Cmd+1` returns to the current document (HTML or Markdown). HTML files can also be passed as application startup arguments or opened through the OS's existing Open With action.
 
 ## Menus and shortcuts
 

@@ -75,7 +75,7 @@ async function launch(args = []) {
   page = await app.firstWindow();
   page.setDefaultTimeout(6000);
   page.on('pageerror', error => errors.push(error.message));
-  await page.waitForSelector('.cm-content');
+  await page.waitForSelector('.cm-content', { state: 'attached' });
   await app.evaluate(({ clipboard }) => {
     globalThis.qaClipboard = { text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), image: clipboard.readImage() };
   });
@@ -163,16 +163,46 @@ async function selectAlpha() {
       await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).waitFor();
       assert.ok((await page.locator('.workspaceSummary').innerText()).includes('2 HTML'));
     });
-    await test('HTML opens from the sidebar without replacing unsaved Markdown', async () => {
+    await test('Switching unsaved Markdown to HTML can be canceled', async () => {
       await open();
       await page.keyboard.insertText('Unsaved HTML test ');
       const before = await readDoc();
+      const prompts = [];
+      const cancel = async dialog => { prompts.push(dialog.message()); await dialog.dismiss(); };
+      page.on('dialog', cancel);
+      try {
+        await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).click();
+        await settle();
+        assert.equal(prompts.length, 2);
+        assert.equal(await readDoc(), before);
+        assert.equal(await page.getByLabel('HTML document content').count(), 0);
+        assert.equal(await page.locator('.tabButton').count(), 1);
+        assert.equal(fs.readFileSync(lesson, 'utf8'), fixture);
+      } finally {
+        page.off('dialog', cancel);
+      }
+    });
+    await test('HTML replaces the document area after saving, without a new top tab', async () => {
+      const before = await readDoc();
+      page.once('dialog', dialog => dialog.accept());
       const htmlWindow = app.waitForEvent('window');
       await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).click();
       const web = await htmlWindow;
       await web.waitForURL(htmlUrl);
-      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(tab => tab.url === expected && !tab.loading), htmlUrl);
-      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      await page.getByLabel('HTML document content').waitFor();
+      await page.waitForFunction(() => document.querySelector('[aria-label="HTML document content"]').getAttribute('aria-busy') === 'false');
+      assert.equal(await page.locator('.workspaceSidebar').isVisible(), true);
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.ok((await page.locator('.tabButton').first().innerText()).includes(path.basename(htmlFile)));
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 0);
+      assert.ok(!(await page.locator('.workspaceSplit').getAttribute('class')).includes('webActive'));
+      assert.ok((await page.locator('.workspaceItem.active').innerText()).includes(path.basename(htmlFile)));
+      const bounds = await app.evaluate(({ BrowserWindow }, url) => {
+        const window = BrowserWindow.getAllWindows().find(w => w.webContents.getURL().includes('view=edit'));
+        return window.contentView.children.find(view => view.webContents.getURL() === url).getBounds();
+      }, htmlUrl);
+      const sidebar = await page.locator('.workspaceSidebar').boundingBox();
+      assert.ok(bounds.x >= sidebar.x + sidebar.width);
       assert.equal(await web.locator('h1').innerText(), 'HTML classroom');
       assert.equal(await web.locator('h1').evaluate(el => getComputedStyle(el).color), 'rgb(12, 34, 56)');
       assert.equal(await web.locator('img').evaluate(el => el.complete && el.naturalWidth > 0), true);
@@ -183,35 +213,40 @@ async function selectAlpha() {
       assert.equal(prefs.sandbox, true);
       assert.equal(prefs.webSecurity, true);
       await webKey(htmlUrl, '=');
-      await page.waitForFunction(async () => (await window.markflow.webTabList()).tabs[0].zoomFactor > 1);
+      await page.waitForFunction(() => [...document.querySelectorAll('.bottomBar .pill')].some(el => el.textContent.includes('Zoom 110%')));
       await page.screenshot({ path: path.join(output, 'html-preview.png') });
-      await page.locator('.tabButton').first().click();
-      assert.equal(await readDoc(), before);
-      assert.ok(await page.locator('.dirtyMark').count());
-      assert.equal(fs.readFileSync(lesson, 'utf8'), fixture);
+      assert.equal(await page.locator('.dirtyMark').count(), 0);
+      assert.equal(fs.readFileSync(lesson, 'utf8'), before);
+      fs.writeFileSync(lesson, fixture);
     });
-    await test('Open File accepts HTML, reuses its tab and handles cancellation', async () => {
+    await test('Open File reuses the HTML document view and handles cancellation', async () => {
       await app.evaluate(({ dialog }, filePath) => {
+        globalThis.qaFilePickCount = 0;
         dialog.showOpenDialog = async (_window, options) => {
+          globalThis.qaFilePickCount++;
           globalThis.qaFileFilters = options.filters;
           return { canceled: false, filePaths: [filePath] };
         };
       }, htmlFile);
-      const before = await readDoc();
+      const id = await page.getByLabel('HTML document content').getAttribute('data-content-id');
       await press('Control+o');
-      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
-      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
-      assert.equal(await readDoc(), before);
+      assert.equal(await app.evaluate(() => globalThis.qaFilePickCount), 1);
+      await settle();
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.equal(await page.getByLabel('HTML document content').getAttribute('data-content-id'), id);
       const filters = await app.evaluate(() => globalThis.qaFileFilters);
       assert.ok(filters.some(filter => filter.extensions.includes('html') && filter.extensions.includes('htm')));
       await webKey(htmlUrl, 'o');
       await settle();
-      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
+      assert.equal(await app.evaluate(() => globalThis.qaFilePickCount), 2);
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.equal(await app.context().pages().find(p => p.url() === htmlUrl).locator('#increment').innerText(), 'Clicks: 1');
       await app.evaluate(({ dialog }) => { dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] }); });
       assert.equal(await page.evaluate(() => window.markflow.docOpen()), null);
       const result = await page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), htmlFile);
-      assert.ok(result.tab);
-      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
+      assert.equal(result.docPath, htmlFile);
+      assert.equal(result.html.id, id);
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 0);
       await assert.rejects(page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), path.join(htmlDir, 'missing.html')));
       await assert.rejects(page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), path.join(htmlDir, 'style.css')));
     });
@@ -220,8 +255,11 @@ async function selectAlpha() {
       assert.ok(web);
       await web.getByRole('link', { name: 'Next page', exact: true }).click();
       await web.waitForURL(pathToFileURL(linkedHtml).toString());
-      const tab = (await page.evaluate(() => window.markflow.webTabList())).tabs[0];
-      assert.equal((await page.evaluate(args => window.markflow.webTabNavigate(args), { id: tab.id, url: htmlUrl })).success, true);
+      await page.waitForFunction(name => document.querySelector('.tabButton').textContent.includes(name), path.basename(linkedHtml));
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.ok((await page.locator('.workspaceItem.active').innerText()).includes(path.basename(linkedHtml)));
+      const id = await page.getByLabel('HTML document content').getAttribute('data-content-id');
+      assert.equal((await page.evaluate(args => window.markflow.webTabNavigate(args), { id, url: htmlUrl })).success, true);
       await web.waitForURL(htmlUrl);
       await web.evaluate(url => { location.href = url; }, pathToFileURL(lesson).toString());
       await settle();
@@ -243,16 +281,84 @@ async function selectAlpha() {
       const tabs = (await page.evaluate(() => window.markflow.webTabList())).tabs;
       const remote = tabs.find(tab => tab.url === url);
       assert.equal((await page.evaluate(args => window.markflow.webTabNavigate(args), { id: remote.id, url: htmlUrl })).success, false);
+      assert.equal(await page.locator('.tabButton').count(), 2);
+      await page.locator('.tabButton').first().click();
+      await page.getByLabel('HTML document content').waitFor();
+      assert.equal(await page.locator('.workspaceSidebar').isVisible(), true);
+      assert.equal(await web.locator('h1').innerText(), 'HTML classroom');
       for (const tab of tabs) await page.evaluate(id => window.markflow.webTabClose({ id }), tab.id);
       await page.waitForFunction(() => !document.querySelector('.workspaceSplit').classList.contains('webActive'));
       await open();
     });
-    await test('HTML startup argument renders in an active internal tab', async () => {
+    await test('Switching HTML and HTM keeps one document slot and cannot overwrite HTML', async () => {
+      const htmlWindow = app.waitForEvent('window');
+      await page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), htmlFile);
+      const previous = await htmlWindow;
+      await previous.waitForURL(htmlUrl);
+      const htmWindow = app.waitForEvent('window');
+      await page.locator('.workspaceItem').filter({ hasText: path.basename(linkedHtml) }).click();
+      const htm = await htmWindow;
+      await htm.waitForURL(pathToFileURL(linkedHtml).toString());
+      await page.waitForFunction(name => document.querySelector('.tabButton').textContent.includes(name), path.basename(linkedHtml));
+      assert.equal(previous.isClosed(), true);
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.equal(await page.locator('.workspaceSidebar').isVisible(), true);
+      assert.equal(await htm.locator('h1').innerText(), 'Next page');
+      const original = fs.readFileSync(linkedHtml, 'utf8');
+      await webKey(pathToFileURL(linkedHtml).toString(), 's');
+      assert.equal(await page.evaluate(filePath => window.markflow.docSave({ docPath: filePath, markdown: 'must not overwrite' }), linkedHtml), null);
+      assert.equal(fs.readFileSync(linkedHtml, 'utf8'), original);
+      await page.getByRole('button', { name: '✎ Edit', exact: true }).click();
+      assert.ok(await page.locator('.menuDropdown .menuItem').evaluateAll(items => items.every(item => item.disabled)));
+      await page.getByRole('button', { name: '✎ Edit', exact: true }).click();
+      await open();
+      assert.equal(htm.isClosed(), true);
+      assert.equal(await page.getByLabel('HTML document content').count(), 0);
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.equal(await readDoc(), fixture);
+    });
+    await test('Open File canceled Save As preserves unsaved Markdown; discard switches to HTML', async () => {
+      await restoreClipboard();
+      await app.close();
+      fs.writeFileSync(path.join(scratch, 'profile', 'state.json'), JSON.stringify({ lastDocPath: null, lastWorkspaceDirPath: htmlDir }));
+      await launch();
+      await page.waitForFunction(() => document.querySelector('.cm-content').cmTile.view.state.doc.length === 0);
+      await page.locator('.cm-content').click();
+      await page.keyboard.insertText('Untitled HTML switch');
+      await app.evaluate(({ dialog }, filePath) => {
+        dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+        dialog.showSaveDialog = async () => ({ canceled: true });
+      }, htmlFile);
+      page.once('dialog', dialog => dialog.accept());
+      await press('Control+o');
+      assert.equal(await readDoc(), 'Untitled HTML switch');
+      assert.equal(await page.getByLabel('HTML document content').count(), 0);
+      let prompts = 0;
+      const discard = async dialog => { if (prompts++ === 0) await dialog.dismiss(); else await dialog.accept(); };
+      page.on('dialog', discard);
+      const htmlWindow = app.waitForEvent('window');
+      try {
+        await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).click();
+        const html = await htmlWindow;
+        await html.waitForURL(htmlUrl);
+        await page.getByLabel('HTML document content').waitFor();
+        assert.equal(prompts, 2);
+        assert.equal(await page.locator('.tabButton').count(), 1);
+        assert.equal(await page.locator('.workspaceSidebar').isVisible(), true);
+      } finally {
+        page.off('dialog', discard);
+      }
+      await open();
+    });
+    await test('HTML startup argument renders in the shared document area', async () => {
       await restoreClipboard();
       await app.close();
       await launch([htmlFile]);
-      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(tab => tab.url === expected && !tab.loading), htmlUrl);
-      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      await page.getByLabel('HTML document content').waitFor();
+      await page.waitForFunction(() => document.querySelector('[aria-label="HTML document content"]').getAttribute('aria-busy') === 'false');
+      assert.equal(await page.locator('.tabButton').count(), 1);
+      assert.equal(await page.locator('.workspaceSidebar').isVisible(), true);
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 0);
       const web = app.context().pages().find(p => p.url() === htmlUrl);
       assert.equal(await web.title(), 'Local HTML lesson');
       for (const tab of (await page.evaluate(() => window.markflow.webTabList())).tabs) await page.evaluate(id => window.markflow.webTabClose({ id }), tab.id);

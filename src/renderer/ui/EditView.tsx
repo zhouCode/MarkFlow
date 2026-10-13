@@ -718,6 +718,8 @@ function isPathInsideDir(filePath: string, dirPath: string): boolean {
 export function EditView() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [docPath, setDocPath] = React.useState<string | null>(null);
+  const [htmlDocument, setHtmlDocument] = React.useState<WebTabState | null>(null);
+  const htmlDocumentRef = React.useRef<WebTabState | null>(null);
   const [documentRevision, setDocumentRevision] = React.useState(0);
   const [markdown, setMarkdown] = React.useState('');
   const [lastSavedMarkdown, setLastSavedMarkdown] = React.useState('');
@@ -797,11 +799,18 @@ export function EditView() {
     const offCloseSnapshot = window.markflow.onCloseSnapshotRequested(() => markdownRef.current);
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
       setActiveTabId('markdown');
+      htmlDocumentRef.current = payload.html;
+      setHtmlDocument(payload.html);
       markdownRef.current = payload.markdown;
       setDocumentRevision((value) => value + 1);
       setDocPath(payload.docPath);
       setMarkdown(payload.markdown);
       setLastSavedMarkdown(payload.markdown);
+    });
+    const offHtmlUpdate = window.markflow.onHtmlDocumentUpdated((payload) => {
+      htmlDocumentRef.current = payload.html;
+      setHtmlDocument(payload.html);
+      setDocPath(payload.docPath);
     });
     const offDocSaved = window.markflow.onDocSaved((payload) => {
       setDocPath(payload.docPath);
@@ -814,6 +823,7 @@ export function EditView() {
       offWebTabOpened();
       offCloseSnapshot();
       offDocUpdate();
+      offHtmlUpdate();
       offDocSaved();
       offZoom();
     };
@@ -1008,7 +1018,8 @@ export function EditView() {
   }, [presentationMode, editorViewVersion]);
 
   const syncActiveWebTabBounds = React.useCallback(() => {
-    const currentActiveTabId = activeTabIdRef.current;
+    const currentActiveTabId = activeTabIdRef.current === 'markdown' ? htmlDocumentRef.current?.id : activeTabIdRef.current;
+    if (!currentActiveTabId) return;
     if (currentActiveTabId === 'markdown') return;
     const host = webHostRef.current;
     if (!host) return;
@@ -1023,12 +1034,13 @@ export function EditView() {
   }, []);
 
   React.useEffect(() => {
-    if (activeTabId === 'markdown' || remixSettingsOpen || aboutOpen) {
+    const contentId = activeTabId === 'markdown' ? htmlDocument?.id : activeTabId;
+    if (!contentId || remixSettingsOpen || aboutOpen) {
       void window.markflow.webTabFocus({ id: null });
       return;
     }
-    void window.markflow.webTabFocus({ id: activeTabId }).then((result) => {
-      if (result.success) setAddressDraft(result.tab.url);
+    void window.markflow.webTabFocus({ id: contentId }).then((result) => {
+      if (result.success && activeTabId !== 'markdown') setAddressDraft(result.tab.url);
     });
     syncActiveWebTabBounds();
     const onResize = () => syncActiveWebTabBounds();
@@ -1039,12 +1051,12 @@ export function EditView() {
       window.removeEventListener('resize', onResize);
       observer?.disconnect();
     };
-  }, [activeTabId, syncActiveWebTabBounds, remixSettingsOpen, aboutOpen]);
+  }, [activeTabId, htmlDocument?.id, syncActiveWebTabBounds, remixSettingsOpen, aboutOpen]);
 
   React.useLayoutEffect(() => {
-    if (activeTabId === 'markdown') return;
+    if (activeTabId === 'markdown' && !htmlDocument) return;
     syncActiveWebTabBounds();
-  }, [activeTabId, syncActiveWebTabBounds]);
+  }, [activeTabId, htmlDocument, sidebarOpen, syncActiveWebTabBounds]);
 
   const focusTab = React.useCallback((id: string) => {
     setActiveTabId(id);
@@ -1088,8 +1100,8 @@ export function EditView() {
   }, [activeTabId, addressDraft, showToast, webTabs]);
 
   const adjustActiveWebTabZoom = React.useCallback(async (action: 'in' | 'out' | 'reset') => {
-    const currentActiveTabId = activeTabIdRef.current;
-    if (currentActiveTabId === 'markdown') return false;
+    const currentActiveTabId = activeTabIdRef.current === 'markdown' ? htmlDocumentRef.current?.id : activeTabIdRef.current;
+    if (!currentActiveTabId) return false;
     const result = await window.markflow.webTabAdjustZoom({ id: currentActiveTabId, action });
     if (!result.success) {
       showToast({ kind: 'error', text: result.message ?? 'Unable to adjust web zoom.' });
@@ -1099,6 +1111,7 @@ export function EditView() {
   }, [showToast]);
 
   const runEditorCommand = React.useCallback((command: (view: EditorView) => boolean) => {
+    if (htmlDocumentRef.current) return false;
     const view = editorViewRef.current;
     if (!view || view.state.readOnly) return false;
     setActiveTabId('markdown');
@@ -1109,6 +1122,7 @@ export function EditView() {
   }, []);
 
   const handleExportPdf = React.useCallback(async () => {
+    if (htmlDocument) return;
     const result = await window.markflow.exportPdf({ markdown, docPath });
     if (result.success) {
       showToast({ kind: 'info', text: `PDF exported to ${result.filePath}` });
@@ -1119,7 +1133,7 @@ export function EditView() {
       return;
     }
     showToast({ kind: 'error', text: result.message ?? 'PDF export failed.' });
-  }, [docPath, markdown, showToast]);
+  }, [docPath, htmlDocument, markdown, showToast]);
 
   const syncScrollerMetrics = React.useCallback((scroller: HTMLElement) => {
     setCurrentScrollTop(scroller.scrollTop);
@@ -1314,7 +1328,7 @@ export function EditView() {
     try {
       const filePath = await window.markflow.docPick();
       if (!filePath) return;
-      if (!/\.html?$/i.test(filePath) && !(await confirmSwitchIfDirty())) return;
+      if (!(await confirmSwitchIfDirty())) return;
       await window.markflow.docOpenPath({ filePath });
     } catch (error) {
       alert(error instanceof Error ? error.message : '打开文件失败');
@@ -1340,14 +1354,15 @@ export function EditView() {
   const handleOpenWorkspaceEntry = React.useCallback(
     async (entry: FileBrowserEntry) => {
       if (entry.kind !== 'file' || (!entry.isMarkdown && !entry.isHtml)) return;
-      if (entry.isMarkdown && !(await confirmSwitchIfDirty())) return;
+      if (entry.path === docPath) return;
+      if (!(await confirmSwitchIfDirty())) return;
       try {
         await window.markflow.docOpenPath({ filePath: entry.path });
       } catch (error) {
         alert(error instanceof Error ? error.message : '打开文件失败');
       }
     },
-    [confirmSwitchIfDirty]
+    [confirmSwitchIfDirty, docPath]
   );
 
   React.useEffect(() => {
@@ -1478,7 +1493,7 @@ export function EditView() {
       const inTextField = target instanceof HTMLElement &&
         !editorViewRef.current?.contentDOM.contains(target) &&
         (target.matches('input, textarea, select') || target.isContentEditable);
-      const editorActive = activeTabIdRef.current === 'markdown' && !inTextField;
+      const editorActive = activeTabIdRef.current === 'markdown' && !htmlDocumentRef.current && !inTextField;
 
       if (mod && !e.altKey && !e.shiftKey && e.key === '1') {
         e.preventDefault();
@@ -1591,13 +1606,13 @@ export function EditView() {
       }
       if ((e.ctrlKey || e.metaKey) && (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract')) {
         e.preventDefault();
-        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomOut();
+        if (activeTabIdRef.current === 'markdown' && !htmlDocumentRef.current) window.markflow.contentZoomOut();
         else void adjustActiveWebTabZoom('out');
         return;
       }
       if ((e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0')) {
         e.preventDefault();
-        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomReset();
+        if (activeTabIdRef.current === 'markdown' && !htmlDocumentRef.current) window.markflow.contentZoomReset();
         else void adjustActiveWebTabZoom('reset');
         return;
       }
@@ -1606,7 +1621,7 @@ export function EditView() {
         (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd')
       ) {
         e.preventDefault();
-        if (activeTabIdRef.current === 'markdown') window.markflow.contentZoomIn();
+        if (activeTabIdRef.current === 'markdown' && !htmlDocumentRef.current) window.markflow.contentZoomIn();
         else void adjustActiveWebTabZoom('in');
         return;
       }
@@ -1626,6 +1641,7 @@ export function EditView() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
+        if (htmlDocumentRef.current) return;
         window.markflow.docSave({ docPath: docPathRef.current, markdown: markdownRef.current });
         return;
       }
@@ -1794,11 +1810,11 @@ export function EditView() {
   }, [closeMenus]);
 
   const menuItem = React.useCallback((label: string, shortcut: string, action: () => void, disabled = false) => (
-    <button className="menuItem" disabled={disabled || (openMenu === 'edit' && presentationMode)} onMouseDown={menuMouseDown} onClick={() => runMenuAction(action)}>
+    <button className="menuItem" disabled={disabled || (openMenu === 'edit' && (presentationMode || Boolean(htmlDocument)))} onMouseDown={menuMouseDown} onClick={() => runMenuAction(action)}>
       <span>{label}</span>
       {shortcut ? <kbd>{shortcut}</kbd> : null}
     </button>
-  ), [menuMouseDown, runMenuAction, openMenu, presentationMode]);
+  ), [menuMouseDown, runMenuAction, openMenu, presentationMode, htmlDocument]);
 
   const imageRenderedHeight = React.useCallback((key: string) => {
     const width = imageWidthByKey[key] ?? 720;
@@ -1868,7 +1884,7 @@ export function EditView() {
             <div className="menuDropdown" onMouseLeave={closeMenus}>
               {menuItem('Open File', shortcut('mod', 'O'), () => void handleOpenFile())}
               {menuItem('Open Folder', '', () => void handleOpenFolder())}
-              {menuItem('Switch to Markdown', shortcut('mod', '1'), () => setActiveTabId('markdown'))}
+              {menuItem('Switch to Document', shortcut('mod', '1'), () => setActiveTabId('markdown'))}
               {menuItem('Switch to Web', shortcut('mod', '2'), focusFirstWebTab)}
               {menuItem('Open Remix', shortcut('shift', 'mod', 'R'), () => void handleQuickOpen())}
               {menuItem('默认url设置', '', () => {
@@ -1880,7 +1896,7 @@ export function EditView() {
               {menuItem('Close Web Tab', shortcut('mod', 'W'), closeCurrentWebTab, activeTabId === 'markdown')}
               {menuItem('Toggle Files', '', () => setSidebarOpen((open) => !open))}
               {menuItem('Toggle Present', shortcut('shift', 'mod', 'P'), () => setPresentationMode((value) => !value))}
-              {menuItem('Export PDF', '', () => void handleExportPdf())}
+              {menuItem('Export PDF', '', () => void handleExportPdf(), Boolean(htmlDocument))}
               {menuItem('Theme', '', toggleTheme)}
               {menuItem('About', 'F1', () => setAboutOpen((open) => !open))}
               {menuItem(updateButtonLabel, '', handleUpdateAction, updateStatus === 'checking')}
@@ -2146,7 +2162,8 @@ export function EditView() {
             </aside>
           ) : null}
           <div className="card zoomCard">
-            <div className="cardBody fullHeight editorPane zoomEditorPane unifiedEditorPane">
+            {htmlDocument && activeTabId === 'markdown' ? <div ref={webHostRef} className="webTabHost" aria-label="HTML document content" aria-busy={htmlDocument.loading} data-content-id={htmlDocument.id} /> : null}
+            <div className="cardBody fullHeight editorPane zoomEditorPane unifiedEditorPane" style={htmlDocument ? { display: 'none' } : undefined}>
               <CodeMirror
                 key={documentRevision}
                 value={markdown}
@@ -2199,7 +2216,7 @@ export function EditView() {
                   }
                 }}
                 onChange={(value) => {
-                  if (presentationMode) return;
+                  if (presentationMode || htmlDocumentRef.current) return;
                   markdownRef.current = value;
                   setMarkdown(value);
                   window.markflow.docSetMarkdown({ docPath, markdown: value });
@@ -2272,7 +2289,7 @@ export function EditView() {
         </div>
         <div className="right">
           <span className="pill" title={activeTabId === 'markdown' ? 'Document zoom' : 'Web page zoom (Ctrl/Cmd +/-/0)'}>
-            Zoom {activeTabId === 'markdown' ? Math.round(contentZoomScale * 100) : Math.round((activeWebTab?.zoomFactor ?? 1) * 100)}%
+            Zoom {activeTabId === 'markdown' ? Math.round((htmlDocument?.zoomFactor ?? contentZoomScale) * 100) : Math.round((activeWebTab?.zoomFactor ?? 1) * 100)}%
           </span>
           {updateStatus === 'downloading' ? <span className="pill">Downloading {Math.round(downloadProgress)}%</span> : null}
         </div>
