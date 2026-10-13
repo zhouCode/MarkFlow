@@ -38,6 +38,7 @@ declare global {
     depth: number;
     parentPath: string | null;
     isMarkdown: boolean;
+    isHtml: boolean;
   };
 
   type AppInfo = {
@@ -57,12 +58,14 @@ declare global {
   type WebTabState = { id: string; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; zoomFactor: number };
   type WebTabResult = { success: true; tab: WebTabState } | { success: false; message: string };
   type WebTabListResult = { success: true; tabs: WebTabState[] } | { success: false; message: string };
+  type FileOpenResult = { docPath: string | null; markdown: string } | { tab: WebTabState };
 
   interface Window {
     markflow: {
       platform: string;
-      docOpen: () => Promise<{ docPath: string | null; markdown: string } | null>;
-      docOpenPath: (args: { filePath: string }) => Promise<{ docPath: string | null; markdown: string }>;
+      docPick: () => Promise<string | null>;
+      docOpen: () => Promise<FileOpenResult | null>;
+      docOpenPath: (args: { filePath: string }) => Promise<FileOpenResult>;
       docSave: (args: { docPath: string | null; markdown: string }) => Promise<{ docPath: string | null } | null>;
       docSetMarkdown: (args: { docPath: string | null; markdown: string }) => void;
       folderOpen: () => Promise<{ dirPath: string } | null>;
@@ -107,6 +110,7 @@ declare global {
       onAppShortcut: (cb: (input: { key: string; code: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }) => void) => () => void;
       openExternal: (args: { url: string }) => Promise<OpenExternalResult>;
       webTabList: () => Promise<WebTabListResult>;
+      onWebTabOpened: (cb: (payload: WebTabState) => void) => () => void;
       webTabCreate: (args: { url: string; reuseExisting?: boolean }) => Promise<WebTabResult>;
       webTabFocus: (args: { id: string | null }) => Promise<WebTabResult>;
       webTabClose: (args: { id: string }) => Promise<WebTabResult>;

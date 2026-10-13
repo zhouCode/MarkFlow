@@ -788,8 +788,14 @@ export function EditView() {
   }, [notesWindowOpen]);
 
   React.useEffect(() => {
+    const offWebTabOpened = window.markflow.onWebTabOpened((tab) => {
+      setWebTabs((prev) => prev.some((item) => item.id === tab.id) ? prev : [...prev, tab]);
+      setActiveTabId(tab.id);
+      setAddressDraft(tab.url);
+    });
     const offCloseSnapshot = window.markflow.onCloseSnapshotRequested(() => markdownRef.current);
     const offDocUpdate = window.markflow.onDocUpdate((payload) => {
+      setActiveTabId('markdown');
       markdownRef.current = payload.markdown;
       setDocumentRevision((value) => value + 1);
       setDocPath(payload.docPath);
@@ -804,6 +810,7 @@ export function EditView() {
       setContentZoomScale(payload.scale);
     });
     return () => {
+      offWebTabOpened();
       offCloseSnapshot();
       offDocUpdate();
       offDocSaved();
@@ -1068,14 +1075,16 @@ export function EditView() {
 
   const navigateActiveWebTab = React.useCallback(async () => {
     if (activeTabId === 'markdown') return;
-    const normalized = normalizeExternalHttpUrl(addressDraft);
+    const isLocalTab = webTabs.find((tab) => tab.id === activeTabId)?.url.startsWith('file:');
+    const normalized = isLocalTab && addressDraft.trim().startsWith('file:')
+      ? addressDraft.trim() : normalizeExternalHttpUrl(addressDraft);
     if (!normalized) {
       showToast({ kind: 'error', text: 'Enter a valid http or https URL.' });
       return;
     }
     const result = await window.markflow.webTabNavigate({ id: activeTabId, url: normalized });
     if (!result.success) showToast({ kind: 'error', text: result.message ?? 'Unable to navigate tab.' });
-  }, [activeTabId, addressDraft, showToast]);
+  }, [activeTabId, addressDraft, showToast, webTabs]);
 
   const adjustActiveWebTabZoom = React.useCallback(async (action: 'in' | 'out' | 'reset') => {
     const currentActiveTabId = activeTabIdRef.current;
@@ -1299,9 +1308,11 @@ export function EditView() {
   }, [lastSavedMarkdown, markdown, saveCurrentDocument]);
 
   const handleOpenFile = React.useCallback(async () => {
-    if (!(await confirmSwitchIfDirty())) return;
     try {
-      await window.markflow.docOpen();
+      const filePath = await window.markflow.docPick();
+      if (!filePath) return;
+      if (!/\.html?$/i.test(filePath) && !(await confirmSwitchIfDirty())) return;
+      await window.markflow.docOpenPath({ filePath });
     } catch (error) {
       alert(error instanceof Error ? error.message : '打开文件失败');
     }
@@ -1325,8 +1336,8 @@ export function EditView() {
 
   const handleOpenWorkspaceEntry = React.useCallback(
     async (entry: FileBrowserEntry) => {
-      if (entry.kind !== 'file' || !entry.isMarkdown) return;
-      if (!(await confirmSwitchIfDirty())) return;
+      if (entry.kind !== 'file' || (!entry.isMarkdown && !entry.isHtml)) return;
+      if (entry.isMarkdown && !(await confirmSwitchIfDirty())) return;
       try {
         await window.markflow.docOpenPath({ filePath: entry.path });
       } catch (error) {
@@ -1658,6 +1669,10 @@ export function EditView() {
   );
   const workspaceMarkdownCount = React.useMemo(
     () => workspaceEntries.filter((entry) => entry.isMarkdown).length,
+    [workspaceEntries]
+  );
+  const workspaceHtmlCount = React.useMemo(
+    () => workspaceEntries.filter((entry) => entry.isHtml).length,
     [workspaceEntries]
   );
   const workspaceFolderCount = React.useMemo(
@@ -2080,12 +2095,12 @@ export function EditView() {
                   <div className="workspaceEmpty">Open a folder to browse files in the current directory.</div>
                 ) : null}
                 {workspaceStatus === 'ready' && visibleWorkspaceEntries.length === 0 ? (
-                  <div className="workspaceEmpty">This folder does not contain any markdown files.</div>
+                  <div className="workspaceEmpty">This folder does not contain any Markdown or HTML files.</div>
                 ) : null}
                 {workspaceStatus === 'ready' && visibleWorkspaceEntries.length > 0 ? (
                   <>
                     <div className="workspaceSummary">
-                      {workspaceMarkdownCount} markdown in {workspaceFolderCount} folders
+                      {workspaceMarkdownCount} Markdown · {workspaceHtmlCount} HTML in {workspaceFolderCount} folders
                     </div>
                     <div className="workspaceList">
                       {visibleWorkspaceEntries.map((entry) => {

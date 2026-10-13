@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { pathToFileURL } = require('node:url');
 
 const root = path.resolve(__dirname, '..');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'markflow-qa-'));
@@ -15,6 +16,16 @@ const lesson = path.join(scratch, 'lesson.md');
 const other = path.join(scratch, 'other.md');
 fs.writeFileSync(lesson, fixture);
 fs.writeFileSync(other, '# Other lesson\n\nAnother document.\n');
+const htmlDir = path.join(scratch, 'HTML only');
+fs.mkdirSync(htmlDir);
+const htmlFile = path.join(htmlDir, '课堂 #1.HTML');
+const htmlUrl = pathToFileURL(htmlFile).toString();
+const linkedHtml = path.join(htmlDir, 'next.htm');
+fs.writeFileSync(htmlFile, '<!doctype html><html><head><title>Local HTML lesson</title><link rel="stylesheet" href="style.css"></head><body><h1>HTML classroom</h1><img src="diagram.svg"><button id="increment">Clicks: 0</button><a href="next.htm">Next page</a><script src="lesson.js"></script></body></html>');
+fs.writeFileSync(linkedHtml, '<!doctype html><title>Next HTML lesson</title><h1>Next page</h1>');
+fs.writeFileSync(path.join(htmlDir, 'style.css'), 'h1 { color: rgb(12, 34, 56); }');
+fs.writeFileSync(path.join(htmlDir, 'lesson.js'), 'let clicks = 0; document.querySelector("#increment").onclick = event => event.target.textContent = `Clicks: ${++clicks}`;');
+fs.writeFileSync(path.join(htmlDir, 'diagram.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="blue"/></svg>');
 for (const color of ['red', 'blue']) {
   const dir = path.join(scratch, color);
   fs.mkdirSync(dir);
@@ -138,6 +149,109 @@ async function selectAlpha() {
     await test('File-argument startup registers IPC and loads document', async () => {
       assert.equal((await page.evaluate(() => window.markflow.webTabList())).success, true);
       await page.waitForFunction(text => document.querySelector('.cm-content').cmTile.view.state.doc.toString() === text, fixture);
+    });
+    await test('HTML-only folders appear in the sidebar alongside Markdown', async () => {
+      const { entries } = await page.evaluate(dirPath => window.markflow.folderList({ dirPath }), scratch);
+      assert.ok(entries.some(entry => entry.path === htmlDir && entry.kind === 'directory'));
+      assert.ok(entries.some(entry => entry.path === htmlFile && entry.isHtml && !entry.isMarkdown));
+      assert.ok(entries.some(entry => entry.path === linkedHtml && entry.isHtml));
+      assert.ok(entries.some(entry => entry.path === lesson && entry.isMarkdown && !entry.isHtml));
+      assert.ok(!entries.some(entry => entry.name === 'style.css'));
+      await app.evaluate(({ dialog }, dirPath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dirPath] }); }, htmlDir);
+      await page.getByRole('button', { name: '☰ Function', exact: true }).click();
+      await page.getByRole('button', { name: 'Open Folder', exact: true }).click();
+      await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).waitFor();
+      assert.ok((await page.locator('.workspaceSummary').innerText()).includes('2 HTML'));
+    });
+    await test('HTML opens from the sidebar without replacing unsaved Markdown', async () => {
+      await open();
+      await page.keyboard.insertText('Unsaved HTML test ');
+      const before = await readDoc();
+      await page.locator('.workspaceItem').filter({ hasText: path.basename(htmlFile) }).click();
+      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(tab => tab.url === expected && !tab.loading), htmlUrl);
+      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      const web = app.context().pages().find(p => p.url() === htmlUrl);
+      assert.ok(web);
+      assert.equal(await web.locator('h1').innerText(), 'HTML classroom');
+      assert.equal(await web.locator('h1').evaluate(el => getComputedStyle(el).color), 'rgb(12, 34, 56)');
+      assert.equal(await web.locator('img').evaluate(el => el.complete && el.naturalWidth > 0), true);
+      await web.locator('#increment').click();
+      assert.equal(await web.locator('#increment').innerText(), 'Clicks: 1');
+      assert.deepEqual(await web.evaluate(() => [typeof require, typeof process, typeof window.markflow]), ['undefined', 'undefined', 'undefined']);
+      const prefs = await app.evaluate(({ webContents }, url) => webContents.getAllWebContents().find(w => w.getURL() === url).getLastWebPreferences(), htmlUrl);
+      assert.equal(prefs.sandbox, true);
+      assert.equal(prefs.webSecurity, true);
+      await webKey(htmlUrl, '=');
+      await page.waitForFunction(async () => (await window.markflow.webTabList()).tabs[0].zoomFactor > 1);
+      await page.locator('.tabButton').first().click();
+      assert.equal(await readDoc(), before);
+      assert.ok(await page.locator('.dirtyMark').count());
+      assert.equal(fs.readFileSync(lesson, 'utf8'), fixture);
+    });
+    await test('Open File accepts HTML, reuses its tab and handles cancellation', async () => {
+      await app.evaluate(({ dialog }, filePath) => {
+        dialog.showOpenDialog = async (_window, options) => {
+          globalThis.qaFileFilters = options.filters;
+          return { canceled: false, filePaths: [filePath] };
+        };
+      }, htmlFile);
+      const before = await readDoc();
+      await press('Control+o');
+      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
+      assert.equal(await readDoc(), before);
+      const filters = await app.evaluate(() => globalThis.qaFileFilters);
+      assert.ok(filters.some(filter => filter.extensions.includes('html') && filter.extensions.includes('htm')));
+      await app.evaluate(({ dialog }) => { dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] }); });
+      assert.equal(await page.evaluate(() => window.markflow.docOpen()), null);
+      const result = await page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), htmlFile);
+      assert.ok(result.tab);
+      assert.equal((await page.evaluate(() => window.markflow.webTabList())).tabs.length, 1);
+      await assert.rejects(page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), path.join(htmlDir, 'missing.html')));
+      await assert.rejects(page.evaluate(filePath => window.markflow.docOpenPath({ filePath }), path.join(htmlDir, 'style.css')));
+    });
+    await test('Local HTML navigation stays scoped and remote links use separate tabs', async () => {
+      const web = app.context().pages().find(p => p.url() === htmlUrl);
+      assert.ok(web);
+      await web.getByRole('link', { name: 'Next page', exact: true }).click();
+      await web.waitForURL(pathToFileURL(linkedHtml).toString());
+      const tab = (await page.evaluate(() => window.markflow.webTabList())).tabs[0];
+      assert.equal((await page.evaluate(args => window.markflow.webTabNavigate(args), { id: tab.id, url: htmlUrl })).success, true);
+      await web.waitForURL(htmlUrl);
+      await web.evaluate(url => { location.href = url; }, pathToFileURL(lesson).toString());
+      await settle();
+      assert.equal(web.url(), htmlUrl);
+      const loaded = await web.evaluate(url => new Promise(resolve => {
+        const img = new Image(); img.onload = () => resolve(true); img.onerror = () => resolve(false); img.src = url;
+      }), pathToFileURL(path.join(scratch, 'red', 'diagram.svg')).toString());
+      assert.equal(loaded, false);
+      if (process.platform !== 'win32') {
+        const escaped = path.join(htmlDir, 'escaped.svg');
+        fs.symlinkSync(path.join(scratch, 'red', 'diagram.svg'), escaped);
+        assert.equal(await web.evaluate(url => new Promise(resolve => {
+          const img = new Image(); img.onload = () => resolve(true); img.onerror = () => resolve(false); img.src = url;
+        }), pathToFileURL(escaped).toString()), false);
+      }
+      await web.evaluate(url => { location.href = url; }, url);
+      await page.waitForFunction(async url => (await window.markflow.webTabList()).tabs.some(tab => tab.url === url && !tab.loading), url);
+      assert.equal(web.url(), htmlUrl);
+      const tabs = (await page.evaluate(() => window.markflow.webTabList())).tabs;
+      const remote = tabs.find(tab => tab.url === url);
+      assert.equal((await page.evaluate(args => window.markflow.webTabNavigate(args), { id: remote.id, url: htmlUrl })).success, false);
+      for (const tab of tabs) await page.evaluate(id => window.markflow.webTabClose({ id }), tab.id);
+      await page.waitForFunction(() => !document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      await open();
+    });
+    await test('HTML startup argument renders in an active internal tab', async () => {
+      await restoreClipboard();
+      await app.close();
+      await launch([htmlFile]);
+      await page.waitForFunction(async expected => (await window.markflow.webTabList()).tabs.some(tab => tab.url === expected && !tab.loading), htmlUrl);
+      await page.waitForFunction(() => document.querySelector('.workspaceSplit').classList.contains('webActive'));
+      const web = app.context().pages().find(p => p.url() === htmlUrl);
+      assert.equal(await web.title(), 'Local HTML lesson');
+      for (const tab of (await page.evaluate(() => window.markflow.webTabList())).tabs) await page.evaluate(id => window.markflow.webTabClose({ id }), tab.id);
+      await open();
     });
     for (const key of ['Control+b', 'Control+i', 'Control+e', 'Control+k', 'Control+Shift+x', 'Control+Shift+c', 'Control+Shift+t', 'Control+Alt+1', 'Control+Alt+2', 'Control+Alt+3', 'Control+Shift+7', 'Control+Shift+8']) {
       await test(`Present blocks ${key}`, async () => {

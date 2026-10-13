@@ -6,6 +6,7 @@ MarkFlow is an Electron Markdown editor designed for teaching and live walkthrou
 
 - Markdown editor with classroom-friendly rendered editing
 - Internal web tabs for `http/https` pages, including Remix IDE
+- Local `.html` / `.htm` files in the workspace sidebar, rendered in isolated internal tabs
 - One-window screen sharing: switch between Markdown and Remix without changing shared windows
 - Address bar for internal web tabs
 - Quick-open Remix / configurable quick URL
@@ -31,6 +32,14 @@ MarkFlow is an Electron Markdown editor designed for teaching and live walkthrou
 - The address bar accepts URLs and opens/navigates internal web tabs.
 - Web tabs keep their own zoom level.
 - Remote web content is isolated from Node integration.
+
+## Local HTML files
+
+- Use **Function → Open File** (or `Ctrl/Cmd+O`) to open a `.html` or `.htm` file, or select one from **Open Folder**'s file list.
+- HTML is rendered as a page in an internal tab, not edited as Markdown. Opening it leaves the current Markdown document and unsaved edits intact; reopening the same page focuses its existing tab.
+- Relative images, stylesheets and browser scripts can load from the HTML file's directory and its subdirectories. Files outside that directory (including symlinks pointing outside) are blocked; keep page assets alongside the HTML file.
+- Local pages run sandboxed, with no Node or MarkFlow API access, in a separate non-persistent session. Local HTML links stay within that directory; `http/https` links open separate web tabs.
+- Tabs support the usual switch, close and zoom shortcuts. HTML files can also be passed as application startup arguments or opened through the OS's existing Open With action.
 
 ## Menus and shortcuts
 

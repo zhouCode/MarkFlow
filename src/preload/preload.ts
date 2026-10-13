@@ -16,6 +16,7 @@ export type FileBrowserEntry = {
   depth: number;
   parentPath: string | null;
   isMarkdown: boolean;
+  isHtml: boolean;
 };
 
 export type NotesWindowEntry = {
@@ -70,6 +71,7 @@ export type WebTabListResult = { success: true; tabs: WebTabState[] } | { succes
 
 contextBridge.exposeInMainWorld('markflow', {
   platform: process.platform,
+  docPick: () => ipcRenderer.invoke('doc:pick'),
   docOpen: () => ipcRenderer.invoke('doc:open'),
   docOpenPath: (args: { filePath: string }) => ipcRenderer.invoke('doc:openPath', args),
   docSave: (args: { docPath: string | null; markdown: string }) => ipcRenderer.invoke('doc:save', args),
@@ -158,6 +160,11 @@ contextBridge.exposeInMainWorld('markflow', {
   },
   openExternal: (args: { url: string }) => ipcRenderer.invoke('app:openExternal', args),
   webTabList: () => ipcRenderer.invoke('webTab:list'),
+  onWebTabOpened: (cb: (payload: WebTabState) => void) => {
+    const handler = (_: unknown, payload: WebTabState) => cb(payload);
+    ipcRenderer.on('webTab:opened', handler);
+    return () => ipcRenderer.removeListener('webTab:opened', handler);
+  },
   webTabCreate: (args: { url: string; reuseExisting?: boolean }) => ipcRenderer.invoke('webTab:create', args),
   webTabFocus: (args: { id: string | null }) => ipcRenderer.invoke('webTab:focus', args),
   webTabClose: (args: { id: string }) => ipcRenderer.invoke('webTab:close', args),
